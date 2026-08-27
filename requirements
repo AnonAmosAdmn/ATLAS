@@ -1,0 +1,14 @@
+numpy
+pandas
+scipy
+scikit-learn
+networkx
+plotly
+matplotlib
+sentence-transformers
+torch
+umap-learn
+hdbscan
+streamlit
+gensim
+torchvision
