@@ -1,4 +1,12 @@
+Current version:
+------------------------------------------
+
+ATLAS v10 — Active Native Language Maps
+
+------------------------------------------
+
 Install:
+------------------------------------------
 
 pip install -r requirements.txt
 
@@ -6,27 +14,8 @@ streamlit run ATLAS.py
 
 ------------------------------------------
 
-Current version:
-
-ATLAS v10 — Active Native Language Maps
-
-------------------------------------------
-
-Dedicated analyzers currently include:
-
-English
-
-Persian / Farsi
-
-Arabic
-
-Mandarin Chinese
-
-Turkish
-
-------------------------------------------
-
 Features:
+------------------------------------------
 
 Word and utterance analysis
 
@@ -58,7 +47,10 @@ Candidate coordinate and gap discovery
 
 Interactive Streamlit lab
 
------------------------------------------
+---------------------------------------------
+
+ATLAS 
+---------------------------------------------
 
 This code implements an interactive research laboratory (Streamlit app) called ATLAS Multi-Space Training Data Foundry. It is designed to transform natural language utterances into richly typed, multi‑dimensional linguistic states, compare them across languages, discover latent structure, and generate versioned training corpora for downstream supervised learning. The system is built around a core epistemic principle: unknown is not zero; similarity is not a typed relation; display projections are not native state.
 
@@ -272,3 +264,23 @@ Shared default ≠ invariant – coordinates that are constant across all member
 Display projection ≠ native state – PCA or t‑SNE projections are only visual aids; typed coordinates are the source of truth.
 
 Candidate ≠ fact – coordinate candidates, gap candidates, and term proposals are flagged as CANDIDATE or PROVISIONAL until independently validated.
+
+---------------------------------------------
+
+Summary
+---------------------------------------------
+This code is a research‑grade environment that:
+
+Takes natural language and produces a richly structured, multi‑space typed representation.
+
+Applies language‑specific processing via pluggable active maps.
+
+Compares multiple utterances/languages to extract cross‑lingual invariants and residuals.
+
+Discovers unexplained structure that may correspond to missing linguistic coordinates.
+
+Generates a comprehensive, provenance‑aware training dataset with explicit eligibility gates and deterministic splits.
+
+Persists all data in a versioned SQLite spine and allows export in multiple formats.
+
+It is not a production system but a laboratory for building and evaluating the ATLAS architecture, with the explicit goal of producing high‑quality, testable training material for downstream models while respecting the epistemic boundaries of the observed data.
