@@ -4,11 +4,13 @@ pip install -r requirements.txt
 
 streamlit run ATLAS.py
 
+------------------------------------------
 
 Current version:
 
 ATLAS v10 — Active Native Language Maps
 
+------------------------------------------
 
 Dedicated analyzers currently include:
 
@@ -22,6 +24,7 @@ Mandarin Chinese
 
 Turkish
 
+------------------------------------------
 
 Features:
 
