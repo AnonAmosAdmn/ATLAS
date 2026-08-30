@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ATLAS MULTI-SPACE LANGUAGE LABORATORY — v10
-==========================================
+ATLAS MULTI-SPACE TRAINING DATA FOUNDRY — v11.0
+============================================
 
 A runnable Streamlit laboratory bridging conventional multilingual embeddings
 with the richer ATLAS object/state architecture used in this project.
@@ -17,6 +17,7 @@ Supported experiment modes
 7. Coordinate / Gap Discovery
 8. Language Intelligence Benchmark
 9. Active Native Language Maps
+10. Data / Metadata Observatory
 
 ATLAS object hierarchy
 ----------------------
@@ -39,29 +40,61 @@ TopLayerState
     ├── provenance
     └── validationStatus
 
+Persistent data spine
+---------------------
+SourceArtifact → SourceRecord → DatasetRun → Atomic Facts → DataProduct
+      │                │              │              │             │
+      └── content hash └── evidence   └── snapshot   └── lineage   └── recurse
+
+The SQLite store is append-oriented and records schema versions, complete run
+snapshots, normalized objects/coordinates/edges/metadata, source artifacts,
+training candidates, lineage edges, and recursively materialized products.
+
 Important epistemic rule
 ------------------------
 Most typed coordinates in this prototype are HEURISTIC / PROVISIONAL.
 Embeddings and latent vectors are learned observation layers, not native ATLAS
 typed coordinates. Display projections are never treated as native state.
 
+Every experiment emits a versioned ATLAS data bundle containing
+normalized objects, coordinate facts, relation/hyperrelation facts, metadata
+lineage, quality metrics, snapshots, drift keys, and gated training examples.
+The persistent data spine stores runs, content-addressed source artifacts,
+schema versions, lineage edges and recursively materialized data products.
+
 Run
 ---
-pip install -r requirements_atlas_multispace_lab.txt
+Save this file as `atlas_multispace_lab.py`, then install the base runtime:
+
+pip install streamlit numpy pandas networkx plotly scikit-learn
+
+Optional learned/NNS and lexical resources:
+
+pip install sentence-transformers torch nltk
+
 streamlit run atlas_multispace_lab.py
+
+The default persistent store is `atlas_data/atlas_lab.sqlite3`. Override it
+with the `ATLAS_DB_PATH` environment variable or the sidebar setting.
 """
 
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 import math
+import os
 import random
 import re
+import sqlite3
 import unicodedata
 import uuid
+import zipfile
+import zlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Iterable
 
 import numpy as np
@@ -79,7 +112,10 @@ from sklearn.metrics.pairwise import cosine_similarity
 # Constants / schemas
 # =============================================================================
 
-APP_TITLE = "ATLAS Multi-Space Language Laboratory v10 — Active Native Language Maps"
+APP_TITLE = "ATLAS Multi-Space Training Data Foundry v11.0"
+ATLAS_DATA_SCHEMA_VERSION = "ATLAS_TRAINING_DATA_BUNDLE_v2.0"
+ATLAS_STORE_SCHEMA_VERSION = 1
+DEFAULT_ATLAS_DB_PATH = os.environ.get("ATLAS_DB_PATH","atlas_data/atlas_lab.sqlite3")
 DEFAULT_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
 LANGUAGES = {
@@ -194,7 +230,74 @@ EXPERIMENT_MODES = [
     "Coordinate / Gap Discovery",
     "Language Intelligence Benchmark",
     "Active Native Language Maps",
+    "Data / Metadata Observatory",
 ]
+
+MODE_DISPLAY_NAMES = {
+    "Single word / utterance + each token":"1 · Carrier State Generator — token → word → utterance",
+    "Word ↔ Word":"2 · Word Transformation / Contrast Generator",
+    "Word → Many Languages":"3 · Multilingual Word Alignment Generator",
+    "Utterance ↔ Utterance":"4 · Utterance Transformation / Contrast Generator",
+    "Utterance → Many Languages":"5 · Multilingual Utterance Alignment Generator",
+    "Language Map ↔ Language Map":"6 · Language-Map Alignment Generator",
+    "Coordinate / Gap Discovery":"7 · Structural Discovery + Hard-Negative Generator",
+    "Language Intelligence Benchmark":"8 · Benchmark + Falsification Corpus Generator",
+    "Active Native Language Maps":"9 · Native Language-Map Supervision Generator",
+    "Data / Metadata Observatory":"10 · Training Dataset Foundry + Export",
+}
+
+MODE_TRAINING_CONTRACTS = {
+    "Single word / utterance + each token":{
+        "unit":"one carrier and its containment hierarchy",
+        "produces":["TOKEN_STATE_RECONSTRUCTION","WORD_STATE_CONSTRUCTION","UTTERANCE_STATE_RECONSTRUCTION","TRANSFORMATION_PREDICTION","STATE_TO_TEXT"],
+        "gate":"typed-state validation, resolved carrier identity, uncertainty retained",
+    },
+    "Word ↔ Word":{
+        "unit":"controlled word pair",
+        "produces":["PAIR_STATE_DELTA","RELATION_CLASSIFICATION","WORD_TRANSFORMATION","CONTRASTIVE_STATE_RANKING"],
+        "gate":"typed relation evidence; similarity alone never supplies the label",
+    },
+    "Word → Many Languages":{
+        "unit":"declared multilingual lexical realization set",
+        "produces":["CROSS_LANGUAGE_LEXICAL_ALIGNMENT","INVARIANT_EXTRACTION","RESIDUAL_PREDICTION","LEXICAL_GAP_DETECTION"],
+        "gate":"independent native states before alignment; missing is not zero",
+    },
+    "Utterance ↔ Utterance":{
+        "unit":"controlled utterance pair",
+        "produces":["PAIR_STATE_DELTA","MEANING_FRAME_CONTRAST","UTTERANCE_TRANSFORMATION","COUNTERFACTUAL_TRANSFORMATION"],
+        "gate":"predicted invariants and changes must be testable against rebuilt target state",
+    },
+    "Utterance → Many Languages":{
+        "unit":"declared multilingual utterance realization set",
+        "produces":["CROSS_LANGUAGE_FRAME_ALIGNMENT","INVARIANT_EXTRACTION","RESIDUAL_PREDICTION","UNTRANSLATABLE_STRUCTURE"],
+        "gate":"no invented translations; native-map evidence and uncertainty travel with each member",
+    },
+    "Language Map ↔ Language Map":{
+        "unit":"pair of native language-map states",
+        "produces":["LANGUAGE_MAP_COORDINATE_ALIGNMENT","NATIVE_MECHANIC_CONTRAST","ALIGNMENT_INTERFACE_PREDICTION"],
+        "gate":"only explicitly shared native coordinates are comparable",
+    },
+    "Coordinate / Gap Discovery":{
+        "unit":"multi-member unexplained-structure experiment",
+        "produces":["COORDINATE_CANDIDATE","GAP_CLASSIFICATION","TERM_REQUIREMENT","REJECTED_COORDINATE_HARD_NEGATIVE"],
+        "gate":"persistence, novelty, low known-coordinate correlation, independent validation pending",
+    },
+    "Language Intelligence Benchmark":{
+        "unit":"versioned multilingual benchmark corpus",
+        "produces":["COMPREHENSION_CALIBRATION","ANALYZER_FAILURE_PREDICTION","LANGUAGE_PROFILE","FALSIFICATION_REPAIR"],
+        "gate":"failures remain training material; scores never silently become comprehension claims",
+    },
+    "Active Native Language Maps":{
+        "unit":"one native language-map state plus optional probe",
+        "produces":["LANGUAGE_MAP_STATE_CONSTRUCTION","NATIVE_OPERATOR_PREDICTION","NATIVE_CONSTRAINT_CLASSIFICATION","MAP_CONDITIONED_ANALYSIS"],
+        "gate":"map-specific mechanics stay distinct from shared defaults",
+    },
+    "Data / Metadata Observatory":{
+        "unit":"all versioned runs, atomic facts, rejected candidates and lineage",
+        "produces":["task-sharded JSONL","eligible and rejected corpora","normalized CSV tables","complete reproducible bundle"],
+        "gate":"group-safe split, provenance, evidence class, validation and exclusion reason required",
+    },
+}
 
 
 # =============================================================================
@@ -418,6 +521,11 @@ class ComprehensionCertificate:
     ambiguities: list[str]
     unresolved_items: list[str]
     confidence: float
+    structural_coverage: float = 0.0
+    semantic_resolution: float = 0.0
+    comprehension_score: float = 0.0
+    evidence_items: dict[str, Any] = field(default_factory=dict)
+    falsification_tests: list[str] = field(default_factory=list)
     status: str = "PROVISIONAL"
 
 @dataclass
@@ -520,6 +628,27 @@ class TokenState:
     lexicalNeighborhood: LexicalNeighborhood | None = None
 
 @dataclass
+class WordState:
+    """A lexical carrier above tokenizer units and below the utterance state.
+
+    The current analyzers usually emit one orthographic token per word, but this
+    explicit layer keeps the dataset schema valid when subword, clitic, compound,
+    or multi-token lexical carriers are introduced.
+    """
+    id: str
+    surface: str
+    lemma: str
+    language: str
+    token_ids: list[str]
+    typed_spaces: dict[str, dict[str, float]]
+    relations: list[Relation]
+    lexicalNeighborhood: LexicalNeighborhood | None
+    uncertainty: UncertaintyState
+    provenance: Provenance
+    validation: ValidationState
+    status: str = "DERIVED_WORD_STATE"
+
+@dataclass
 class UtteranceState:
     id: str
     form: str
@@ -606,6 +735,62 @@ class TopLayerState:
     coordinateCandidates: list[CoordinateCandidate] = field(default_factory=list)
     gapCandidates: list[GapCandidate] = field(default_factory=list)
     termProposals: list[TermProposal] = field(default_factory=list)
+
+@dataclass
+class DatasetRunManifest:
+    run_id: str
+    schema_version: str
+    app_version: str
+    created_at: str
+    experiment_mode: str
+    content_fingerprint: str
+    configuration: dict[str, Any]
+    counts: dict[str, int]
+    quality: dict[str, float]
+    provenance: dict[str, Any]
+    status: str = "PROVISIONAL_DATASET_RUN"
+
+@dataclass
+class AtlasDatasetRun:
+    manifest: DatasetRunManifest
+    objects: list[dict[str, Any]]
+    coordinate_facts: list[dict[str, Any]]
+    edge_facts: list[dict[str, Any]]
+    metadata_facts: list[dict[str, Any]]
+    training_examples: list[dict[str, Any]]
+    snapshots: dict[str, Any]
+
+@dataclass
+class AtlasSourceArtifact:
+    source_id: str
+    source_type: str
+    title: str
+    language: str
+    uri: str
+    license: str
+    version: str
+    content_hash: str
+    retrieved_at: str
+    parser: str
+    evidence_class: str
+    record_count: int
+    metadata: dict[str, Any]
+    status: str = "REGISTERED_SOURCE"
+
+@dataclass
+class AtlasDataProduct:
+    product_id: str
+    name: str
+    product_type: str
+    created_at: str
+    content_fingerprint: str
+    query_spec: dict[str, Any]
+    source_run_ids: list[str]
+    source_product_ids: list[str]
+    payload: Any
+    quality: dict[str, float]
+    provenance: dict[str, Any]
+    status: str = "MATERIALIZED_PROVISIONAL"
 
 
 # =============================================================================
@@ -819,8 +1004,8 @@ def tokenize(text: str, lang: str, utt_id: str) -> list[Token]:
         surface = m.group(0)
         if not surface.strip():
             continue
-        lemma = surface.casefold()
         pos = guess_pos(surface)
+        lemma = english_lemma(surface, pos) if lang == "en" else surface.casefold()
         morph = guess_morph(surface, pos)
         tokens.append(
             Token(
@@ -854,6 +1039,17 @@ def guess_pos(surface: str) -> str:
         return "SCONJ"
     if w in ENGLISH_COMMON_VERBS:
         return "VERB"
+    # Resolve regular English inflections from the declared verb registry.
+    # This closes a concrete v10 failure: `means` was typed X even though
+    # `mean` was registered as a verb.
+    for suffix in ("s", "es", "ed", "ing"):
+        if not w.endswith(suffix) or len(w) <= len(suffix) + 1:
+            continue
+        candidates = [w[:-len(suffix)]]
+        if suffix in {"es", "ed", "ing"}:
+            candidates.append(w[:-len(suffix)] + "e")
+        if any(base in ENGLISH_COMMON_VERBS for base in candidates):
+            return "VERB"
     if w in ENGLISH_COMMON_NOUNS:
         return "NOUN"
     if w in ENGLISH_COMMON_ADJ:
@@ -880,6 +1076,24 @@ def guess_pos(surface: str) -> str:
     if len(w) <= 3:
         return "FUNC"
     return "X"
+
+def english_lemma(surface: str, pos: str) -> str:
+    """Small, explicit English lemmatizer for registered predicates."""
+    w = surface.casefold()
+    if pos != "VERB" or w in ENGLISH_COMMON_VERBS:
+        return w
+    if w.endswith("ies") and w[:-3] + "y" in ENGLISH_COMMON_VERBS:
+        return w[:-3] + "y"
+    for suffix in ("s", "es", "ed", "ing"):
+        if not w.endswith(suffix):
+            continue
+        candidates = [w[:-len(suffix)]]
+        if suffix in {"es", "ed", "ing"}:
+            candidates.append(w[:-len(suffix)] + "e")
+        for base in candidates:
+            if base in ENGLISH_COMMON_VERBS:
+                return base
+    return w
 
 def guess_morph(surface: str, pos: str) -> str:
     w = surface.casefold()
@@ -2072,29 +2286,67 @@ def hyperrelation_extract(tokens: list[Token], rels: list[Relation]) -> list[Hyp
         ))
     return hypers
 
-def candidate_interpretations(text: str, typed: dict[str, dict[str, float]]) -> list[dict[str, Any]]:
+def candidate_interpretations(text: str,
+                              typed: dict[str, dict[str, float]],
+                              frames: list[MeaningFrame]) -> list[dict[str, Any]]:
+    """Emit interpretations only to the level supported by resolved frames."""
+    if not frames:
+        return [{
+            "id": "I0",
+            "label": "surface-form-only; meaning unresolved",
+            "weight": 1.0,
+            "status": "STRUCTURAL_ONLY",
+            "evidence": "no meaning frame resolved",
+        }]
+
+    meta = next((f for f in frames if f.frame_type == "METALINGUISTIC_MEANING"), None)
+    if meta:
+        return [
+            {
+                "id": "I0",
+                "label": "metalinguistic meaning equivalence",
+                "weight": 0.68,
+                "status": "PROVISIONAL",
+                "evidence": meta.canonical_form,
+            },
+            {
+                "id": "I1",
+                "label": "normative reinforcement or directive",
+                "weight": 0.22,
+                "status": "UNRESOLVED",
+                "evidence": "requires discourse, speaker authority, and target context",
+            },
+            {
+                "id": "I2",
+                "label": "token-identity or circular mention reading",
+                "weight": 0.10,
+                "status": "UNRESOLVED",
+                "evidence": "mention/use distinction remains context-sensitive",
+            },
+        ]
+
     base = {
         "id": "I0",
-        "label": "surface-compositional",
-        "weight": 0.62,
+        "label": "frame-supported compositional interpretation",
+        "weight": 0.72,
         "status": "PROVISIONAL",
+        "evidence": frames[0].canonical_form,
     }
     alt = {
         "id": "I1",
         "label": "context-sensitive alternative",
-        "weight": 0.25,
+        "weight": 0.18,
         "status": "UNRESOLVED",
     }
     scope = {
         "id": "I2",
         "label": "scope/attachment alternative",
-        "weight": 0.13,
+        "weight": 0.10,
         "status": "UNRESOLVED",
     }
     if typed.get("SCOPE", {}).get("scope_ambiguity", 0) > 0.4:
-        scope["weight"] = 0.25
-        base["weight"] = 0.52
-        alt["weight"] = 0.23
+        scope["weight"] = 0.22
+        base["weight"] = 0.60
     return [base, alt, scope]
 
 def infer_transformations(typed: dict[str, dict[str, float]]) -> list[Transformation]:
@@ -2254,6 +2506,44 @@ def build_semantic_roles_and_frames(tokens: list[Token],
         if t.pos != "VERB":
             continue
 
+        # `X means Y` is a metalinguistic relation. X and Y may themselves be
+        # operators (as in "no means no"), so normal nominal-role filters must
+        # not erase them or silently convert their mention into logical scope.
+        if w == "mean":
+            expression = _nearest_left(tokens, i, lambda x: x.pos != "PUNCT")
+            interpretation = _nearest_right(tokens, i, lambda x: x.pos != "PUNCT")
+            if expression:
+                roles.append(SemanticRoleBinding(
+                    predicate=t.id, role="EXPRESSION", filler=expression.id,
+                    confidence=.86,
+                    evidence="left argument of registered metalinguistic predicate MEAN"
+                ))
+            if interpretation:
+                roles.append(SemanticRoleBinding(
+                    predicate=t.id, role="INTERPRETATION", filler=interpretation.id,
+                    confidence=.86,
+                    evidence="right argument of registered metalinguistic predicate MEAN"
+                ))
+            if expression or interpretation:
+                left = expression.surface if expression else "UNKNOWN"
+                right = interpretation.surface if interpretation else "UNKNOWN"
+                frames.append(MeaningFrame(
+                    id=uid("frame"),
+                    frame_type="METALINGUISTIC_MEANING",
+                    predicate="MEAN",
+                    predicate_token=t.id,
+                    roles=[r for r in roles if r.predicate == t.id],
+                    polarity="AFFIRMATIVE",
+                    modality="ASSERTED",
+                    affect_type="",
+                    affect_valence=None,
+                    direction="EXPRESSION_TO_INTERPRETATION",
+                    canonical_form=f"MEANING(FORM({left}), INTERPRETATION({right}))",
+                    confidence=.82 if expression and interpretation else .60,
+                    status="PROVISIONAL_METALINGUISTIC"
+                ))
+            continue
+
         subj = _nearest_left(tokens, i, lambda x: x.pos == "PRON")
         obj = _nearest_right(tokens, i, lambda x: x.pos in {"PRON","NOUN","X"})
 
@@ -2355,6 +2645,10 @@ def add_frame_relations(relations: list[Relation],
             out.append(Relation(rb.filler, rb.predicate, "AGENT_OF", "ROLE/SEM", rb.confidence, evidence=rb.evidence))
         elif rb.role == "THEME":
             out.append(Relation(rb.predicate, rb.filler, "THEME", "ROLE/SEM", rb.confidence, evidence=rb.evidence))
+        elif rb.role == "EXPRESSION":
+            out.append(Relation(rb.filler, rb.predicate, "EXPRESSION_OF", "ROLE/META", rb.confidence, evidence=rb.evidence))
+        elif rb.role == "INTERPRETATION":
+            out.append(Relation(rb.predicate, rb.filler, "INTERPRETATION_OF", "ROLE/META", rb.confidence, evidence=rb.evidence))
     for c in coref:
         out.append(Relation(c.source, c.target, c.relation, "REF", c.confidence, evidence=c.evidence))
 
@@ -2368,9 +2662,10 @@ def build_comprehension_certificate(tokens: list[Token],
                                     frames: list[MeaningFrame],
                                     coref: list[CoreferenceEdge]) -> ComprehensionCertificate:
     predicates = [t for t in tokens if t.pos == "VERB"]
-    has_pred = bool(predicates)
-    has_subject = any(r.role in {"AGENT","EXPERIENCER"} for r in roles)
-    has_object = any(r.role in {"THEME","TARGET"} for r in roles)
+    content_tokens = [t for t in tokens if t.pos != "PUNCT"]
+    has_pred = bool(predicates) and bool(frames)
+    has_subject = any(r.role in {"AGENT","EXPERIENCER","EXPRESSION"} for r in roles)
+    has_object = any(r.role in {"THEME","TARGET","INTERPRETATION"} for r in roles)
     reflexives = [t for t in tokens if t.lemma in REFLEXIVE_TO_PERSON]
     coref_ok = not reflexives or bool(coref)
     affect_frames = [f for f in frames if f.frame_type == "AFFECTIVE_ATTITUDE"]
@@ -2380,10 +2675,27 @@ def build_comprehension_certificate(tokens: list[Token],
     addressee_needed = any(t.lemma in {"you","your","yours","yourself","yourselves"} for t in tokens)
     addressee_resolved = (not addressee_needed) or any(t.lemma in {"you","your","yours","yourself","yourselves"} for t in tokens)
 
-    ambiguities = []
-    unresolved = []
+    scope_operators = [
+        t for t in tokens
+        if (t.pos == "PART" and t.lemma in {"not","never","n't"})
+        or (t.pos == "AUX" and t.lemma in {"may","might","could","must","should","can","would","will"})
+    ]
+    question_observed = any(t.surface in {"?","؟"} for t in tokens)
+    scope_required = bool(scope_operators or question_observed)
+    scope_resolved = (
+        not scope_required
+        or bool(frames) and (
+            any(f.polarity == "NEGATED" or f.modality == "MODAL" for f in frames)
+            or question_observed
+        )
+    )
+
+    ambiguities: list[str] = []
+    unresolved: list[str] = []
     if not has_pred:
         unresolved.append("predicate")
+    if not frames:
+        unresolved.append("meaning frame")
     if has_pred and not has_subject:
         unresolved.append("subject/experiencer")
     if has_pred and not has_object:
@@ -2392,11 +2704,67 @@ def build_comprehension_certificate(tokens: list[Token],
         unresolved.append("reflexive antecedent")
     if affect_frames and not affect_target:
         unresolved.append("affect target")
+    if scope_required and not scope_resolved:
+        unresolved.append("operator scope")
     if any(t.pos == "X" for t in tokens if t.pos != "PUNCT"):
         ambiguities.append("unresolved POS/sense candidates")
 
-    resolved_count = 8 - len(unresolved)
-    conf = clamp(0.45 + 0.06*resolved_count - 0.04*len(ambiguities))
+    # Coverage and comprehension are deliberately separated. Coverage asks
+    # whether required structural operations ran. Semantic resolution asks
+    # whether those operations produced a supported meaning frame. No item is
+    # counted as resolved merely because it was not applicable.
+    structural_checks = {
+        "content_tokenization": bool(content_tokens),
+        "predicate_binding": has_pred,
+        "meaning_frame": bool(frames),
+        "left_argument": has_subject,
+        "right_argument": has_object,
+    }
+    if reflexives:
+        structural_checks["reflexive_coreference"] = coref_ok
+    if scope_required:
+        structural_checks["operator_scope"] = scope_resolved
+
+    structural_coverage = mean([float(v) for v in structural_checks.values()], 0.0)
+    frame_confidence = mean([f.confidence for f in frames], 0.0)
+    argument_resolution = mean([float(has_subject), float(has_object)], 0.0) if has_pred else 0.0
+    semantic_checks = [frame_confidence, argument_resolution]
+    if reflexives:
+        semantic_checks.append(float(coref_ok))
+    if affect_frames:
+        semantic_checks.append(float(affect_target))
+    if scope_required:
+        semantic_checks.append(float(scope_resolved))
+    semantic_resolution = mean(semantic_checks, 0.0) if frames else 0.0
+
+    ambiguity_penalty = min(0.45, 0.12 * len(ambiguities))
+    comprehension_score = clamp(
+        math.sqrt(max(0.0, structural_coverage * semantic_resolution))
+        * (1.0 - ambiguity_penalty)
+        * 0.90  # provisional evidence ceiling
+    )
+
+    evidence_items = {
+        "structural_checks": structural_checks,
+        "frame_count": len(frames),
+        "frame_confidence_mean": frame_confidence,
+        "role_count": len(roles),
+        "scope_applicable": scope_required,
+        "coreference_applicable": bool(reflexives),
+        "claim": "evidence-weighted comprehension support, not proof of understanding",
+    }
+    falsification_tests = [
+        "Remove or replace the predicate: predicate_binding and comprehension_score must decrease.",
+        "Destroy an argument binding: structural_coverage and semantic_resolution must decrease.",
+        "Introduce an unresolved operator: scope_resolved must become false until a scoped frame is built.",
+        "Paraphrase while preserving the frame: canonical roles should remain invariant within tolerance.",
+    ]
+
+    status = (
+        "SUPPORTED_PROVISIONAL" if frames and comprehension_score >= .60
+        else "STRUCTURAL_ONLY" if structural_coverage > 0
+        else "UNRESOLVED"
+    )
 
     return ComprehensionCertificate(
         predicate_resolved=has_pred,
@@ -2406,11 +2774,16 @@ def build_comprehension_certificate(tokens: list[Token],
         affect_target_resolved=affect_target,
         speaker_resolved=speaker_present or not any(t.lemma=="i" for t in tokens),
         addressee_resolved=addressee_resolved,
-        scope_resolved=True,
+        scope_resolved=scope_resolved,
         ambiguities=ambiguities,
         unresolved_items=unresolved,
-        confidence=conf,
-        status="PROVISIONAL"
+        confidence=comprehension_score,
+        structural_coverage=structural_coverage,
+        semantic_resolution=semantic_resolution,
+        comprehension_score=comprehension_score,
+        evidence_items=evidence_items,
+        falsification_tests=falsification_tests,
+        status=status,
     )
 
 def build_structural_attention(token_states: list[TokenState],
@@ -2877,7 +3250,11 @@ class AtlasLanguageMap:
                 continue
             pos = self.analyze_pos(surface)
             morph = self.analyze_morphology(surface,pos)
-            out.append(_base_token_from_surface(surface,m.start(),m.end(),len(out),self.lang,utt_id,pos=pos,morph=morph))
+            lemma = english_lemma(surface, pos) if self.lang == "en" else surface.casefold()
+            out.append(_base_token_from_surface(
+                surface,m.start(),m.end(),len(out),self.lang,utt_id,
+                pos=pos,lemma=lemma,morph=morph
+            ))
         return out
 
     def analyze_pos(self, surface: str) -> str:
@@ -3592,18 +3969,51 @@ def make_utterance_state(text: str, lang: str) -> UtteranceState:
 
     unc=make_uncertainty(typed)
     val=make_validation(typed,unc)
-    ints=candidate_interpretations(text,typed)
     transformations=analyzer.native_transformations(text,tokens,typed)
 
     certificate=build_comprehension_certificate(tokens,semantic_roles,meaning_frames,coref)
+    ints=candidate_interpretations(text,typed,meaning_frames)
+
+    # Utterance-level COMP is evidence-calibrated. Token-local integration
+    # remains available as an explicitly named heuristic proxy, but no longer
+    # masquerades as comprehension of the utterance.
+    token_integration_proxy = mean(
+        ts.typed_spaces["COMP"]["integration"] for ts in token_states
+    )
+    typed["COMP"] = {
+        "structural_coverage": certificate.structural_coverage,
+        "semantic_resolution": certificate.semantic_resolution,
+        "comprehension_score": certificate.comprehension_score,
+    }
+
+    # Mentioned operators are not operating on the proposition. This is the
+    # critical mention/use correction for forms such as "no means no".
+    if any(f.frame_type == "METALINGUISTIC_MEANING" for f in meaning_frames):
+        typed["LOG"] = {
+            "negation_operator": 0.0,
+            "metalinguistic_equivalence": mean(
+                f.confidence for f in meaning_frames
+                if f.frame_type == "METALINGUISTIC_MEANING"
+            ),
+            "mention_use_distinction": 1.0,
+        }
+        typed["SCOPE"] = {
+            "scope_ambiguity": 0.18,
+            "operator_scope": 0.0,
+            "mention_use_resolved": 1.0,
+        }
     attention=build_structural_attention(token_states,semantic_roles,meaning_frames)
     attention["uncertainty_focus"]=unc.vector
     attention["native_language_map"]=analyzer.__class__.__name__
 
     comprehension={
-        "preferred_interpretation":ints[0]["id"],
+        "preferred_interpretation":ints[0]["id"] if meaning_frames else None,
         "candidate_count":len(ints),
-        "mean_token_integration":mean(ts.typed_spaces["COMP"]["integration"] for ts in token_states),
+        "structural_coverage":certificate.structural_coverage,
+        "semantic_resolution":certificate.semantic_resolution,
+        "comprehension_score":certificate.comprehension_score,
+        "token_integration_proxy":token_integration_proxy,
+        "token_integration_proxy_status":"HEURISTIC_NOT_COMPREHENSION",
         "unresolved_scope":typed["SCOPE"]["scope_ambiguity"],
         "certificate_confidence":certificate.confidence,
         "resolved_items":{
@@ -3614,7 +4024,7 @@ def make_utterance_state(text: str, lang: str) -> UtteranceState:
             "affect_target":certificate.affect_target_resolved,
         },
         "native_analyzer":analyzer.__class__.__name__,
-        "status":"PROVISIONAL",
+        "status":certificate.status,
     }
 
     knowledge_delta={
@@ -5190,6 +5600,1405 @@ def fiber_plot(state: UtteranceState) -> go.Figure:
 
 
 # =============================================================================
+# ATLAS data / metadata generation and aggregation layer
+# =============================================================================
+
+def json_safe(value: Any) -> Any:
+    """Convert ATLAS runtime values into deterministic JSON-safe records."""
+    if hasattr(value, "__dataclass_fields__"):
+        return json_safe(asdict(value))
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k,v in value.items()}
+    if isinstance(value, (list,tuple,set)):
+        return [json_safe(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.floating,np.integer,np.bool_)):
+        return value.item()
+    if isinstance(value, pd.DataFrame):
+        return value.to_dict(orient="records")
+    if isinstance(value, pd.Series):
+        return value.to_list()
+    if isinstance(value, float) and not np.isfinite(value):
+        return None
+    return value
+
+def stable_fingerprint(value: Any, prefix: str = "fp") -> str:
+    payload = json.dumps(
+        json_safe(value),ensure_ascii=False,sort_keys=True,
+        separators=(",",":"),default=str
+    ).encode("utf-8")
+    return f"{prefix}_{hashlib.sha256(payload).hexdigest()[:20]}"
+
+def derive_word_states(state: UtteranceState) -> list[WordState]:
+    """Lift tokenizer output into explicit lexical-carrier states.
+
+    This deliberately does not average unrelated token states. A future native
+    analyzer may group subtokens/clitics before calling this constructor; until
+    then each non-punctuation orthographic token is one evidenced word carrier.
+    """
+    words=[]
+    for ts in state.tokens:
+        tok=ts.token
+        if tok.pos=="PUNCT":
+            continue
+        word_id=stable_fingerprint({
+            "utterance":state.form,"language":state.language,
+            "token_ids":[tok.id],"surface":tok.surface,"lemma":tok.lemma,
+        },"word")
+        words.append(WordState(
+            id=word_id,surface=tok.surface,lemma=tok.lemma,language=state.language,
+            token_ids=[tok.id],typed_spaces=ts.typed_spaces,relations=ts.relations,
+            lexicalNeighborhood=ts.lexicalNeighborhood,uncertainty=ts.uncertainty,
+            provenance=Provenance(
+                source=f"ATLAS_WORD_LIFT_V11::{state.language}",
+                method="native-token-boundary→lexical-carrier",
+                model=state.languageMapAnalyzer or "prototype",status="DERIVED",
+            ),validation=ts.validation,
+        ))
+    return words
+
+def deterministic_dataset_split(group_fingerprint: str) -> str:
+    """Keep all examples from one carrier/contrast group in the same split."""
+    bucket=int(hashlib.sha256(group_fingerprint.encode("utf-8")).hexdigest()[:8],16)%100
+    return "train" if bucket<80 else ("validation" if bucket<90 else "test")
+
+class AtlasSQLiteStore:
+    """Durable append-oriented store for ATLAS observations and aggregates."""
+
+    DATA_TABLES={
+        "objects","coordinate_facts","edge_facts","metadata_facts","training_examples"
+    }
+
+    def __init__(self,path: str):
+        self.path=str(path)
+        db_path=Path(self.path).expanduser()
+        db_path.parent.mkdir(parents=True,exist_ok=True)
+        self.path=str(db_path)
+        self._initialize()
+
+    def connect(self):
+        conn=sqlite3.connect(self.path,timeout=30)
+        conn.row_factory=sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA foreign_keys=OFF")
+        return conn
+
+    def _initialize(self):
+        ddl="""
+        CREATE TABLE IF NOT EXISTS atlas_schema_registry(
+            schema_name TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            registered_at TEXT NOT NULL,
+            schema_json TEXT NOT NULL,
+            PRIMARY KEY(schema_name,schema_version)
+        );
+        CREATE TABLE IF NOT EXISTS runs(
+            run_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            experiment_mode TEXT NOT NULL,
+            content_fingerprint TEXT NOT NULL,
+            schema_version TEXT NOT NULL,
+            status TEXT NOT NULL,
+            manifest_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_runs_content ON runs(content_fingerprint);
+        CREATE TABLE IF NOT EXISTS snapshots(
+            run_id TEXT PRIMARY KEY,
+            codec TEXT NOT NULL,
+            payload BLOB NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS objects(
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL, object_id TEXT NOT NULL,
+            object_type TEXT, parent_id TEXT, language TEXT,
+            carrier_fingerprint TEXT, status TEXT, payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_objects_carrier ON objects(carrier_fingerprint);
+        CREATE INDEX IF NOT EXISTS idx_objects_run ON objects(run_id);
+        CREATE TABLE IF NOT EXISTS coordinate_facts(
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL, object_id TEXT, object_type TEXT,
+            carrier_fingerprint TEXT, language TEXT, space TEXT,
+            coordinate TEXT, value REAL, evidence_class TEXT,
+            observation_status TEXT, source TEXT, method TEXT,
+            is_unknown INTEGER, payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_coords_carrier ON coordinate_facts(carrier_fingerprint,space,coordinate);
+        CREATE INDEX IF NOT EXISTS idx_coords_run ON coordinate_facts(run_id);
+        CREATE TABLE IF NOT EXISTS edge_facts(
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL, object_id TEXT, object_type TEXT,
+            language TEXT, edge_type TEXT, source TEXT, target TEXT,
+            relation TEXT, space TEXT, weight REAL, status TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_edges_relation ON edge_facts(relation,space);
+        CREATE INDEX IF NOT EXISTS idx_edges_run ON edge_facts(run_id);
+        CREATE TABLE IF NOT EXISTS metadata_facts(
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL, object_id TEXT, object_type TEXT,
+            language TEXT, category TEXT, key TEXT, value_json TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_metadata_category ON metadata_facts(category,key);
+        CREATE INDEX IF NOT EXISTS idx_metadata_run ON metadata_facts(run_id);
+        CREATE TABLE IF NOT EXISTS training_examples(
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL, example_id TEXT, task_type TEXT,
+            language TEXT, confidence REAL, observation_status TEXT,
+            eligible_by_default INTEGER, group_fingerprint TEXT,
+            payload_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_training_task ON training_examples(task_type,eligible_by_default);
+        CREATE TABLE IF NOT EXISTS source_artifacts(
+            source_id TEXT PRIMARY KEY, source_type TEXT, title TEXT,
+            language TEXT, uri TEXT, license TEXT, version TEXT,
+            content_hash TEXT, retrieved_at TEXT, parser TEXT,
+            evidence_class TEXT, record_count INTEGER, status TEXT,
+            metadata_json TEXT, codec TEXT, raw_payload BLOB
+        );
+        CREATE INDEX IF NOT EXISTS idx_source_hash ON source_artifacts(content_hash);
+        CREATE TABLE IF NOT EXISTS source_records(
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL, record_fingerprint TEXT NOT NULL,
+            language TEXT, record_type TEXT, status TEXT,
+            record_json TEXT NOT NULL,
+            UNIQUE(source_id,record_fingerprint)
+        );
+        CREATE TABLE IF NOT EXISTS data_products(
+            product_id TEXT PRIMARY KEY, name TEXT, product_type TEXT,
+            created_at TEXT, content_fingerprint TEXT, status TEXT,
+            query_spec_json TEXT, source_run_ids_json TEXT,
+            source_product_ids_json TEXT, payload_json TEXT,
+            quality_json TEXT, provenance_json TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_products_fingerprint ON data_products(content_fingerprint);
+        CREATE TABLE IF NOT EXISTS lineage_edges(
+            row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL, target_id TEXT NOT NULL,
+            relation TEXT NOT NULL, created_at TEXT NOT NULL,
+            metadata_json TEXT,
+            UNIQUE(source_id,target_id,relation)
+        );
+        """
+        with self.connect() as conn:
+            conn.executescript(ddl)
+            schema_payload={
+                "bundle_schema":ATLAS_DATA_SCHEMA_VERSION,
+                "store_schema":ATLAS_STORE_SCHEMA_VERSION,
+                "tables":sorted([
+                    "runs","snapshots",*self.DATA_TABLES,"source_artifacts",
+                    "source_records","data_products","lineage_edges"
+                ]),
+                "law":"unknown != zero; display != source of truth",
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO atlas_schema_registry VALUES(?,?,?,?)",
+                ("ATLAS_PERSISTENT_STORE",str(ATLAS_STORE_SCHEMA_VERSION),
+                 datetime.now(timezone.utc).isoformat(),
+                 json.dumps(schema_payload,ensure_ascii=False,sort_keys=True))
+            )
+
+    @staticmethod
+    def _payload(value):
+        return json.dumps(json_safe(value),ensure_ascii=False,sort_keys=True,default=str)
+
+    def persist_run(self,run: AtlasDatasetRun | dict[str,Any]) -> bool:
+        data=asdict(run) if hasattr(run,"__dataclass_fields__") else json_safe(run)
+        manifest=data["manifest"]
+        with self.connect() as conn:
+            inserted=conn.execute(
+                "INSERT OR IGNORE INTO runs VALUES(?,?,?,?,?,?,?)",
+                (manifest["run_id"],manifest["created_at"],manifest["experiment_mode"],
+                 manifest["content_fingerprint"],manifest["schema_version"],
+                 manifest.get("status","PROVISIONAL_DATASET_RUN"),self._payload(manifest))
+            ).rowcount
+            if not inserted:
+                return False
+            snapshot_bytes=zlib.compress(self._payload(data.get("snapshots",{})).encode("utf-8"),9)
+            conn.execute("INSERT INTO snapshots VALUES(?,?,?)",(manifest["run_id"],"zlib+json",snapshot_bytes))
+
+            conn.executemany(
+                "INSERT INTO objects(run_id,object_id,object_type,parent_id,language,carrier_fingerprint,status,payload_json) VALUES(?,?,?,?,?,?,?,?)",
+                [(r.get("run_id"),r.get("object_id"),r.get("object_type"),r.get("parent_id"),
+                  r.get("language"),r.get("carrier_fingerprint"),r.get("status"),self._payload(r))
+                 for r in data.get("objects",[])]
+            )
+            conn.executemany(
+                "INSERT INTO coordinate_facts(run_id,object_id,object_type,carrier_fingerprint,language,space,coordinate,value,evidence_class,observation_status,source,method,is_unknown,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(r.get("run_id"),r.get("object_id"),r.get("object_type"),r.get("carrier_fingerprint"),
+                  r.get("language"),r.get("space"),r.get("coordinate"),r.get("value"),
+                  r.get("evidence_class"),r.get("observation_status"),r.get("source"),
+                  r.get("method"),int(bool(r.get("is_unknown"))),self._payload(r))
+                 for r in data.get("coordinate_facts",[])]
+            )
+            conn.executemany(
+                "INSERT INTO edge_facts(run_id,object_id,object_type,language,edge_type,source,target,relation,space,weight,status,payload_json) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                [(r.get("run_id"),r.get("object_id"),r.get("object_type"),r.get("language"),
+                  r.get("edge_type"),r.get("source"),r.get("target"),r.get("relation"),
+                  r.get("space"),r.get("weight"),r.get("status"),self._payload(r))
+                 for r in data.get("edge_facts",[])]
+            )
+            conn.executemany(
+                "INSERT INTO metadata_facts(run_id,object_id,object_type,language,category,key,value_json,payload_json) VALUES(?,?,?,?,?,?,?,?)",
+                [(r.get("run_id"),r.get("object_id"),r.get("object_type"),r.get("language"),
+                  r.get("category"),r.get("key"),self._payload(r.get("value")),self._payload(r))
+                 for r in data.get("metadata_facts",[])]
+            )
+            conn.executemany(
+                "INSERT INTO training_examples(run_id,example_id,task_type,language,confidence,observation_status,eligible_by_default,group_fingerprint,payload_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                [(r.get("run_id"),r.get("example_id"),r.get("task_type"),r.get("language"),
+                  r.get("confidence"),r.get("observation_status"),int(bool(r.get("eligible_by_default"))),
+                  r.get("group_fingerprint"),self._payload(r))
+                 for r in data.get("training_examples",[])]
+            )
+            now=datetime.now(timezone.utc).isoformat()
+            conn.executemany(
+                "INSERT OR IGNORE INTO lineage_edges(source_id,target_id,relation,created_at,metadata_json) VALUES(?,?,?,?,?)",
+                [(manifest["run_id"],r.get("object_id"),"GENERATED",now,
+                  self._payload({"object_type":r.get("object_type")}))
+                 for r in data.get("objects",[])]
+            )
+        return True
+
+    def load_runs(self,limit: int = 200) -> list[dict[str,Any]]:
+        limit=max(1,min(int(limit),2000))
+        with self.connect() as conn:
+            run_rows=conn.execute(
+                "SELECT run_id,manifest_json FROM runs ORDER BY created_at DESC LIMIT ?",(limit,)
+            ).fetchall()
+            runs=[]
+            for rr in reversed(run_rows):
+                rid=rr["run_id"]
+                item={"manifest":json.loads(rr["manifest_json"])}
+                for table in sorted(self.DATA_TABLES):
+                    rows=conn.execute(f"SELECT payload_json FROM {table} WHERE run_id=? ORDER BY row_id",(rid,)).fetchall()
+                    item[table]=[json.loads(x["payload_json"]) for x in rows]
+                snap=conn.execute("SELECT payload FROM snapshots WHERE run_id=?",(rid,)).fetchone()
+                item["snapshots"]=json.loads(zlib.decompress(snap["payload"]).decode("utf-8")) if snap else {}
+                runs.append(item)
+        return runs
+
+    def register_source(self,artifact: AtlasSourceArtifact,
+                        raw_payload: bytes,records: list[dict[str,Any]]) -> bool:
+        with self.connect() as conn:
+            inserted=conn.execute(
+                "INSERT OR IGNORE INTO source_artifacts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (artifact.source_id,artifact.source_type,artifact.title,artifact.language,
+                 artifact.uri,artifact.license,artifact.version,artifact.content_hash,
+                 artifact.retrieved_at,artifact.parser,artifact.evidence_class,
+                 artifact.record_count,artifact.status,self._payload(artifact.metadata),
+                 "zlib",zlib.compress(raw_payload,9))
+            ).rowcount
+            if not inserted:
+                return False
+            for record in records:
+                record_fp=stable_fingerprint(record,"record")
+                conn.execute(
+                    "INSERT OR IGNORE INTO source_records(source_id,record_fingerprint,language,record_type,status,record_json) VALUES(?,?,?,?,?,?)",
+                    (artifact.source_id,record_fp,record.get("language",artifact.language),
+                     record.get("record_type",artifact.source_type),
+                     record.get("status",artifact.evidence_class),self._payload(record))
+                )
+            conn.execute(
+                "INSERT OR IGNORE INTO lineage_edges VALUES(NULL,?,?,?,?,?)",
+                (artifact.source_id,artifact.content_hash,"CONTENT_ADDRESSED_AS",
+                 datetime.now(timezone.utc).isoformat(),self._payload({"records":len(records)}))
+            )
+        return True
+
+    def list_sources(self) -> pd.DataFrame:
+        with self.connect() as conn:
+            return pd.read_sql_query(
+                "SELECT source_id,source_type,title,language,uri,license,version,content_hash,retrieved_at,parser,evidence_class,record_count,status,metadata_json FROM source_artifacts ORDER BY retrieved_at DESC",
+                conn
+            )
+
+    def save_product(self,product: AtlasDataProduct) -> bool:
+        p=asdict(product)
+        with self.connect() as conn:
+            inserted=conn.execute(
+                "INSERT OR IGNORE INTO data_products VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (p["product_id"],p["name"],p["product_type"],p["created_at"],
+                 p["content_fingerprint"],p["status"],self._payload(p["query_spec"]),
+                 self._payload(p["source_run_ids"]),self._payload(p["source_product_ids"]),
+                 self._payload(p["payload"]),self._payload(p["quality"]),
+                 self._payload(p["provenance"]))
+            ).rowcount
+            now=datetime.now(timezone.utc).isoformat()
+            for source_id in p["source_run_ids"]+p["source_product_ids"]:
+                conn.execute(
+                    "INSERT OR IGNORE INTO lineage_edges(source_id,target_id,relation,created_at,metadata_json) VALUES(?,?,?,?,?)",
+                    (source_id,p["product_id"],"AGGREGATED_INTO",now,self._payload({"product_type":p["product_type"]}))
+                )
+        return bool(inserted)
+
+    def list_products(self) -> pd.DataFrame:
+        with self.connect() as conn:
+            return pd.read_sql_query(
+                "SELECT product_id,name,product_type,created_at,content_fingerprint,status,quality_json,source_run_ids_json,source_product_ids_json FROM data_products ORDER BY created_at DESC",
+                conn
+            )
+
+    def catalog_summary(self) -> dict[str,int]:
+        names=["runs","objects","coordinate_facts","edge_facts","metadata_facts",
+               "training_examples","source_artifacts","source_records","data_products","lineage_edges"]
+        with self.connect() as conn:
+            return {name:int(conn.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]) for name in names}
+
+def active_atlas_store() -> AtlasSQLiteStore | None:
+    enabled=st.session_state["_atlas_persistence_enabled"] if "_atlas_persistence_enabled" in st.session_state else True
+    if not enabled:
+        return None
+    path=st.session_state["_atlas_db_path"] if "_atlas_db_path" in st.session_state else DEFAULT_ATLAS_DB_PATH
+    try:
+        return AtlasSQLiteStore(path)
+    except Exception as exc:
+        st.warning(f"Persistent ATLAS store unavailable; session ledger remains active: {exc}")
+        return None
+
+def coordinate_evidence_class(space: str, coordinate: str, value: Any) -> str:
+    key = coordinate.casefold()
+    if value is None or any(x in key for x in ("unknown","unresolved","requires_native_analyzer")):
+        return "UNKNOWN"
+    if coordinate.startswith("native::"):
+        return "PROVISIONAL_NATIVE_MAP"
+    if space == "ORTH" and coordinate in {
+        "punctuation","script_latin","script_arabic","script_cyrillic",
+        "script_han","script_kana","script_hangul","script_devanagari"
+    }:
+        return "OBSERVED_SURFACE"
+    if space == "COMP":
+        return "DERIVED_CERTIFICATE"
+    if space in {"POS","MORPH","SYN","ROLE","REF","SCOPE"}:
+        return "DERIVED_HEURISTIC"
+    return "PROVISIONAL_HEURISTIC"
+
+def _object_row(run_id: str, object_id: str, object_type: str,
+                language: str, label: str, carrier_fingerprint: str,
+                parent_id: str = "", status: str = "PROVISIONAL",
+                **metadata) -> dict[str,Any]:
+    return {
+        "run_id":run_id,"object_id":object_id,"object_type":object_type,
+        "parent_id":parent_id,"language":language,"label":label,
+        "carrier_fingerprint":carrier_fingerprint,"status":status,
+        **json_safe(metadata),
+    }
+
+def _coordinate_rows(run_id: str, object_id: str, object_type: str,
+                     language: str, carrier_fingerprint: str,
+                     typed_spaces: dict[str,dict[str,float]],
+                     provenance: Provenance | dict[str,Any] | None,
+                     validation: ValidationState | dict[str,Any] | None) -> list[dict[str,Any]]:
+    rows=[]
+    prov=json_safe(provenance or {})
+    valid=json_safe(validation or {})
+    for space,coords in typed_spaces.items():
+        for coordinate,value in coords.items():
+            try:
+                numeric=float(value)
+            except Exception:
+                continue
+            evidence_class=coordinate_evidence_class(space,coordinate,numeric)
+            rows.append({
+                "run_id":run_id,"object_id":object_id,"object_type":object_type,
+                "carrier_fingerprint":carrier_fingerprint,"language":language,
+                "space":space,"coordinate":coordinate,"value":numeric,
+                "evidence_class":evidence_class,
+                "observation_status":valid.get("validationStatus","PROVISIONAL"),
+                "source":prov.get("source",""),"method":prov.get("method",""),
+                "model":prov.get("model",""),
+                "is_native_coordinate":coordinate.startswith("native::"),
+                "is_unknown":evidence_class=="UNKNOWN",
+            })
+    return rows
+
+def _metadata_rows(run_id: str, object_id: str, object_type: str,
+                   language: str, categories: dict[str,Any]) -> list[dict[str,Any]]:
+    rows=[]
+    for category,payload in categories.items():
+        safe=json_safe(payload)
+        if isinstance(safe,dict):
+            for key,value in safe.items():
+                rows.append({
+                    "run_id":run_id,"object_id":object_id,"object_type":object_type,
+                    "language":language,"category":category,"key":key,
+                    "value":value if isinstance(value,(str,int,float,bool)) or value is None
+                    else json.dumps(value,ensure_ascii=False,sort_keys=True),
+                })
+        else:
+            rows.append({
+                "run_id":run_id,"object_id":object_id,"object_type":object_type,
+                "language":language,"category":category,"key":"value","value":safe,
+            })
+    return rows
+
+def _training_example(run_id: str, task_type: str, language: str,
+                      input_value: Any, target: Any, evidence: Any,
+                      confidence: float, observation_status: str,
+                      group_fingerprint: str, eligible: bool,
+                      exclusion_reason: str = "", *,
+                      hierarchy_level: str = "MULTISPACE",
+                      supervision_kind: str = "STRUCTURED_PREDICTION",
+                      source_type: str = "ATLAS_CARRIER",
+                      target_type: str = "ATLAS_STATE",
+                      operator: str = "",
+                      invariants: Any = None,
+                      is_negative: bool = False) -> dict[str,Any]:
+    payload={
+        "schema":"ATLAS_TRAINING_EXAMPLE_v2",
+        "run_id":run_id,"task_type":task_type,"language":language,
+        "hierarchy_level":hierarchy_level,
+        "supervision_kind":supervision_kind,
+        "source_type":source_type,"target_type":target_type,
+        "operator":operator,"invariants":json_safe(invariants or []),
+        "input":json_safe(input_value),"target":json_safe(target),
+        "evidence":json_safe(evidence),"confidence":float(confidence),
+        "observation_status":observation_status,
+        "eligible_by_default":bool(eligible),
+        "exclusion_reason":exclusion_reason,
+        "group_fingerprint":group_fingerprint,
+        "split":deterministic_dataset_split(group_fingerprint),
+        "is_negative":bool(is_negative),
+        "loss_mask":{
+            "target":bool(eligible),
+            "confidence":True,
+            "observation_status":True,
+            "uncertainty":True,
+        },
+    }
+    payload["example_id"]=stable_fingerprint(payload,"example")
+    return payload
+
+def build_atlas_dataset_run(
+    experiment_mode: str,
+    states: list[UtteranceState] | None = None,
+    language_maps: list[LanguageMapState] | None = None,
+    configuration: dict[str,Any] | None = None,
+    extra_metadata: dict[str,Any] | None = None,
+) -> AtlasDatasetRun:
+    """Normalize one experiment into objects, facts, metadata and training candidates."""
+    states=states or []
+    language_maps=language_maps or []
+    configuration=json_safe(configuration or {})
+    extra_metadata=json_safe(extra_metadata or {})
+    created=datetime.now(timezone.utc).isoformat()
+    content_descriptor={
+        "mode":experiment_mode,
+        "states":[{"language":s.language,"form":s.form} for s in states],
+        "maps":[m.language for m in language_maps],
+        "configuration":configuration,
+    }
+    content_fp=stable_fingerprint(content_descriptor,"content")
+    run_id=f"run_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+    objects=[]; coordinate_facts=[]; edge_facts=[]; metadata_facts=[]; examples=[]
+
+    for lm in language_maps:
+        carrier_fp=stable_fingerprint({"type":"language_map","language":lm.language,"analyzer":lm.analyzerStatus},"carrier")
+        objects.append(_object_row(
+            run_id,lm.id,"language_map",lm.language,lm.language_name,carrier_fp,
+            status=lm.validation.validationStatus,family=lm.family,
+            analyzer=lm.analyzerStatus.get("class",""),
+        ))
+        coordinate_facts += _coordinate_rows(
+            run_id,lm.id,"language_map",lm.language,carrier_fp,
+            lm.typed_spaces,lm.provenance,lm.validation
+        )
+        for rel in lm.relations:
+            edge_facts.append({
+                "run_id":run_id,"object_id":lm.id,"object_type":"language_map",
+                "language":lm.language,"edge_type":"relation","source":rel.source,
+                "target":rel.target,"relation":rel.relation,"space":rel.space,
+                "weight":rel.weight,"status":rel.status,"evidence":rel.evidence,
+            })
+        for h in lm.hyperrelations:
+            edge_facts.append({
+                "run_id":run_id,"object_id":lm.id,"object_type":"language_map",
+                "language":lm.language,"edge_type":"hyperrelation","source":h.id,
+                "target":json.dumps(h.nodes,ensure_ascii=False),"relation":h.relation,
+                "space":"MULTISPACE","weight":h.confidence,"status":h.status,
+                "evidence":json.dumps(h.roles,ensure_ascii=False),
+            })
+        metadata_facts += _metadata_rows(run_id,lm.id,"language_map",lm.language,{
+            "provenance":lm.provenance,"validation":lm.validation,
+            "uncertainty":lm.uncertainty,"native_mechanics":lm.nativeMechanics,
+            "native_operators":lm.nativeOperators,"native_constraints":lm.nativeConstraints,
+            "alignment_interfaces":lm.alignmentInterfaces,
+            "observation_coverage":lm.observationCoverage,
+        })
+        examples.append(_training_example(
+            run_id,"LANGUAGE_MAP_STATE_CONSTRUCTION",lm.language,
+            {"language":lm.language,"language_name":lm.language_name,"family":lm.family},
+            {"typed_spaces":lm.typed_spaces,"native_mechanics":lm.nativeMechanics,
+             "native_metrics":lm.nativeMetrics,"alignment_interfaces":lm.alignmentInterfaces},
+            {"provenance":asdict(lm.provenance),"validation":asdict(lm.validation),
+             "analyzer_status":lm.analyzerStatus,"observation_coverage":lm.observationCoverage},
+            lm.validation.confidence,lm.validation.validationStatus,carrier_fp,
+            lm.validation.confidence>=.60,"language-map confidence below gate" if lm.validation.confidence<.60 else "",
+            hierarchy_level="LANGUAGE",source_type="LANGUAGE_IDENTITY",target_type="LANGUAGE_MAP_STATE",
+        ))
+        for op in lm.nativeOperators:
+            op_conf=float(op.get("confidence",lm.validation.confidence)) if isinstance(op,dict) else lm.validation.confidence
+            examples.append(_training_example(
+                run_id,"NATIVE_OPERATOR_PREDICTION",lm.language,
+                {"language_map":lm.id,"mechanics":lm.nativeMechanics},op,
+                {"analyzer":lm.analyzerStatus,"provenance":asdict(lm.provenance)},
+                op_conf,"PROVISIONAL_NATIVE_MAP",carrier_fp,op_conf>=.60,
+                "operator confidence below gate" if op_conf<.60 else "",
+                hierarchy_level="LANGUAGE",source_type="LANGUAGE_MAP_STATE",
+                target_type="NATIVE_OPERATOR",operator=str(op.get("operator",op.get("name",""))) if isinstance(op,dict) else str(op),
+            ))
+        for constraint in lm.nativeConstraints:
+            examples.append(_training_example(
+                run_id,"NATIVE_CONSTRAINT_CLASSIFICATION",lm.language,
+                {"language_map":lm.id,"candidate_constraint":constraint},
+                {"applies":True,"constraint":constraint},
+                {"analyzer":lm.analyzerStatus,"provenance":asdict(lm.provenance)},
+                lm.validation.confidence,"PROVISIONAL_NATIVE_MAP",carrier_fp,
+                lm.validation.confidence>=.60,"map confidence below gate" if lm.validation.confidence<.60 else "",
+                hierarchy_level="LANGUAGE",supervision_kind="CLASSIFICATION",
+                source_type="LANGUAGE_MAP_STATE",target_type="NATIVE_CONSTRAINT",
+            ))
+
+    for state in states:
+        carrier_fp=stable_fingerprint({"type":"utterance","language":state.language,"form":state.form},"carrier")
+        cert=state.comprehensionCertificate
+        cert_score=cert.comprehension_score if cert else 0.0
+        objects.append(_object_row(
+            run_id,state.id,"utterance",state.language,state.form,carrier_fp,
+            status=state.validation.validationStatus,token_count=len(state.tokens),
+            frame_count=len(state.meaningFrames),relation_count=len(state.relations),
+            comprehension_score=cert_score,analyzer=state.languageMapAnalyzer,
+        ))
+        coordinate_facts += _coordinate_rows(
+            run_id,state.id,"utterance",state.language,carrier_fp,
+            state.typed_spaces,state.provenance,state.validation
+        )
+        metadata_facts += _metadata_rows(run_id,state.id,"utterance",state.language,{
+            "provenance":state.provenance,"validation":state.validation,
+            "uncertainty":state.uncertainty,"attention":state.attention,
+            "comprehension":state.comprehension,"knowledge_delta":state.knowledgeDelta,
+            "native_mechanics_observed":state.nativeMechanicsObserved,
+            "candidate_interpretations":state.candidateInterpretations,
+        })
+
+        utterance_ok=bool(state.tokens) and state.validation.confidence>=.45
+        examples.append(_training_example(
+            run_id,"UTTERANCE_STATE_RECONSTRUCTION",state.language,state.form,
+            {"typed_spaces":state.typed_spaces,"meaning_frames":[asdict(f) for f in state.meaningFrames],
+             "references":[asdict(r) for r in state.references],
+             "semantic_roles":[asdict(r) for r in state.semanticRoles],
+             "transformations":[asdict(t) for t in state.transformations],
+             "uncertainty":asdict(state.uncertainty)},
+            {"provenance":asdict(state.provenance),"validation":asdict(state.validation),
+             "native_mechanics_observed":state.nativeMechanicsObserved},
+            state.validation.confidence,state.validation.validationStatus,carrier_fp,utterance_ok,
+            "empty or below utterance-state confidence gate" if not utterance_ok else "",
+            hierarchy_level="UTTERANCE",source_type="TEXT_CARRIER",target_type="UTTERANCE_STATE",
+        ))
+        examples.append(_training_example(
+            run_id,"STATE_TO_TEXT",state.language,
+            {"typed_spaces":state.typed_spaces,"meaning_frames":[asdict(f) for f in state.meaningFrames],
+             "language":state.language},state.form,
+            {"carrier_fingerprint":carrier_fp,"validation":asdict(state.validation)},
+            state.validation.confidence,state.validation.validationStatus,carrier_fp,
+            utterance_ok,"source state below inverse-generation gate" if not utterance_ok else "",
+            hierarchy_level="UTTERANCE",supervision_kind="INVERSE_GENERATION",
+            source_type="UTTERANCE_STATE",target_type="TEXT_CARRIER",
+        ))
+
+        for word in derive_word_states(state):
+            word_fp=stable_fingerprint({"utterance":carrier_fp,"word":word.id},"carrier")
+            objects.append(_object_row(
+                run_id,word.id,"word",word.language,word.surface,word_fp,
+                parent_id=state.id,status=word.validation.validationStatus,
+                lemma=word.lemma,token_ids=word.token_ids,
+            ))
+            coordinate_facts += _coordinate_rows(
+                run_id,word.id,"word",word.language,word_fp,
+                word.typed_spaces,word.provenance,word.validation
+            )
+            metadata_facts += _metadata_rows(run_id,word.id,"word",word.language,{
+                "provenance":word.provenance,"validation":word.validation,
+                "uncertainty":word.uncertainty,"lexical_neighborhood":word.lexicalNeighborhood,
+                "token_membership":word.token_ids,
+            })
+            examples.append(_training_example(
+                run_id,"WORD_STATE_CONSTRUCTION",word.language,
+                {"utterance":state.form,"surface":word.surface,"token_ids":word.token_ids},
+                {"lemma":word.lemma,"typed_spaces":word.typed_spaces,
+                 "lexical_neighborhood":word.lexicalNeighborhood},
+                {"provenance":asdict(word.provenance),"validation":asdict(word.validation)},
+                word.validation.confidence,word.validation.validationStatus,carrier_fp,
+                word.validation.confidence>=.45,
+                "word-state confidence below gate" if word.validation.confidence<.45 else "",
+                hierarchy_level="WORD",source_type="TOKEN_SEQUENCE",target_type="WORD_STATE",
+            ))
+
+        for ts in state.tokens:
+            tok=ts.token
+            token_fp=stable_fingerprint({
+                "carrier":carrier_fp,"index":tok.index_u,"surface":tok.surface,"lemma":tok.lemma
+            },"carrier")
+            objects.append(_object_row(
+                run_id,tok.id,"token",state.language,tok.surface,token_fp,
+                parent_id=state.id,status=ts.validation.validationStatus,
+                index=tok.index_u,lemma=tok.lemma,pos=tok.pos,morph=tok.morph,
+                span=list(tok.span),context_u=tok.context_u,
+            ))
+            coordinate_facts += _coordinate_rows(
+                run_id,tok.id,"token",state.language,token_fp,
+                ts.typed_spaces,ts.provenance,ts.validation
+            )
+            metadata_facts += _metadata_rows(run_id,tok.id,"token",state.language,{
+                "provenance":ts.provenance,"validation":ts.validation,
+                "uncertainty":ts.uncertainty,"lexical_neighborhood":ts.lexicalNeighborhood,
+            })
+            token_ok=tok.pos not in {"X","PUNCT"}
+            examples.append(_training_example(
+                run_id,"TOKEN_STATE_RECONSTRUCTION",state.language,
+                {"utterance":state.form,"token":tok.surface,"index":tok.index_u},
+                {"lemma":tok.lemma,"pos":tok.pos,"morph":tok.morph,
+                 "typed_spaces":ts.typed_spaces,"relations":[asdict(r) for r in ts.relations],
+                 "uncertainty":asdict(ts.uncertainty)},
+                {"analyzer":state.languageMapAnalyzer,"validation":asdict(ts.validation)},
+                ts.validation.confidence,ts.validation.validationStatus,carrier_fp,
+                token_ok,"unresolved token class" if not token_ok else "",
+                hierarchy_level="TOKEN",source_type="TOKEN_IN_CONTEXT",target_type="TOKEN_STATE",
+            ))
+
+        for transformation in state.transformations:
+            tr_ok=transformation.status in {"DERIVED","OBSERVED_OPERATOR","VALIDATED"}
+            examples.append(_training_example(
+                run_id,"TRANSFORMATION_PREDICTION",state.language,
+                {"utterance":state.form,"source":transformation.source,
+                 "source_state":state.typed_spaces,"operation":transformation.operation},
+                {"target":transformation.target,"affected_spaces":transformation.affected_spaces,
+                 "delta":transformation.delta},
+                {"transformation":asdict(transformation),"validation":asdict(state.validation)},
+                state.validation.confidence,transformation.status,carrier_fp,tr_ok,
+                "transformation is not observed/derived/validated" if not tr_ok else "",
+                hierarchy_level="TRANSFORMATION",supervision_kind="STATE_TRANSITION",
+                source_type="SOURCE_STATE+OPERATOR",target_type="TARGET_STATE_DELTA",
+                operator=transformation.operation,invariants=[s for s in SPACE_ORDER if s not in transformation.affected_spaces],
+            ))
+
+        for rel in state.relations:
+            edge_facts.append({
+                "run_id":run_id,"object_id":state.id,"object_type":"utterance",
+                "language":state.language,"edge_type":"relation","source":rel.source,
+                "target":rel.target,"relation":rel.relation,"space":rel.space,
+                "weight":rel.weight,"status":rel.status,"evidence":rel.evidence,
+            })
+            examples.append(_training_example(
+                run_id,"RELATION_CLASSIFICATION",state.language,
+                {"utterance":state.form,"source":rel.source,"target":rel.target},
+                {"relation":rel.relation,"space":rel.space},rel.evidence,
+                rel.weight,rel.status,carrier_fp,
+                rel.weight>=.65 and rel.relation!="SURFACE_NEXT",
+                "surface-only or below confidence gate" if rel.weight<.65 or rel.relation=="SURFACE_NEXT" else "",
+            ))
+        for h in state.hyperrelations:
+            edge_facts.append({
+                "run_id":run_id,"object_id":state.id,"object_type":"utterance",
+                "language":state.language,"edge_type":"hyperrelation","source":h.id,
+                "target":json.dumps(h.nodes,ensure_ascii=False),"relation":h.relation,
+                "space":"MULTISPACE","weight":h.confidence,"status":h.status,
+                "evidence":json.dumps(h.roles,ensure_ascii=False),
+            })
+        for c in state.coreference:
+            edge_facts.append({
+                "run_id":run_id,"object_id":state.id,"object_type":"utterance",
+                "language":state.language,"edge_type":"coreference","source":c.source,
+                "target":c.target,"relation":c.relation,"space":"REF",
+                "weight":c.confidence,"status":"PROVISIONAL","evidence":c.evidence,
+            })
+        for rb in state.semanticRoles:
+            edge_facts.append({
+                "run_id":run_id,"object_id":state.id,"object_type":"utterance",
+                "language":state.language,"edge_type":"semantic_role","source":rb.predicate,
+                "target":rb.filler,"relation":rb.role,"space":"ROLE",
+                "weight":rb.confidence,"status":"PROVISIONAL","evidence":rb.evidence,
+            })
+            examples.append(_training_example(
+                run_id,"SEMANTIC_ROLE_BINDING",state.language,
+                {"utterance":state.form,"predicate_token":rb.predicate},
+                {"role":rb.role,"filler_token":rb.filler},rb.evidence,
+                rb.confidence,"PROVISIONAL",carrier_fp,rb.confidence>=.70,
+                "below role confidence gate" if rb.confidence<.70 else "",
+            ))
+
+        for frame in state.meaningFrames:
+            frame_fp=stable_fingerprint({"carrier":carrier_fp,"canonical":frame.canonical_form},"carrier")
+            objects.append(_object_row(
+                run_id,frame.id,"meaning_frame",state.language,frame.canonical_form,frame_fp,
+                parent_id=state.id,status=frame.status,frame_type=frame.frame_type,
+                predicate=frame.predicate,confidence=frame.confidence,
+                polarity=frame.polarity,modality=frame.modality,direction=frame.direction,
+            ))
+            examples.append(_training_example(
+                run_id,"MEANING_FRAME_CONSTRUCTION",state.language,state.form,
+                {"frame_type":frame.frame_type,"canonical_form":frame.canonical_form,
+                 "roles":[asdict(r) for r in frame.roles],"polarity":frame.polarity,
+                 "modality":frame.modality,"direction":frame.direction},
+                {"predicate_token":frame.predicate_token,"status":frame.status},
+                frame.confidence,frame.status,carrier_fp,frame.confidence>=.70,
+                "below frame confidence gate" if frame.confidence<.70 else "",
+            ))
+
+        examples.append(_training_example(
+            run_id,"COMPREHENSION_CALIBRATION",state.language,state.form,
+            asdict(cert) if cert else {"status":"UNRESOLVED"},
+            {"frames":[f.canonical_form for f in state.meaningFrames],
+             "unresolved":cert.unresolved_items if cert else ["certificate"]},
+            cert_score,cert.status if cert else "UNRESOLVED",carrier_fp,
+            bool(cert and state.meaningFrames and cert_score>=.60),
+            "no supported meaning frame or score below gate" if not (cert and state.meaningFrames and cert_score>=.60) else "",
+        ))
+        for neighbor in state.counterfactualNeighbors:
+            examples.append(_training_example(
+                run_id,"COUNTERFACTUAL_TRANSFORMATION",state.language,state.form,
+                asdict(neighbor),{"source_frame":[f.canonical_form for f in state.meaningFrames]},
+                cert_score,neighbor.status,carrier_fp,bool(state.meaningFrames),
+                "source frame unresolved" if not state.meaningFrames else "",
+                hierarchy_level="TRANSFORMATION",supervision_kind="COUNTERFACTUAL_STATE_TRANSITION",
+                source_type="UTTERANCE_STATE+INTERVENTION",target_type="PREDICTED_STATE_DELTA",
+                operator=neighbor.operation,invariants=neighbor.expected_invariants,
+            ))
+
+        if cert:
+            for unresolved in cert.unresolved_items:
+                examples.append(_training_example(
+                    run_id,"COMPREHENSION_MISSING_EVIDENCE",state.language,
+                    {"utterance":state.form,"candidate_claim":unresolved},
+                    {"supported":False,"missing_item":unresolved},
+                    {"certificate":asdict(cert),"falsification_tests":cert.falsification_tests},
+                    max(0.0,1.0-cert.comprehension_score),cert.status,carrier_fp,True,"",
+                    hierarchy_level="UTTERANCE",supervision_kind="HARD_NEGATIVE",
+                    source_type="COMPREHENSION_CLAIM",target_type="EVIDENCE_GATE",
+                    is_negative=True,
+                ))
+
+    # Mode-level supervision joins carrier states into comparisons, alignments,
+    # invariants, residuals, discovery targets, and benchmark failures.
+    if len(states)>=2:
+        summaries=[space_summary(s.typed_spaces) for s in states]
+        if len(states)==2:
+            delta={sp:float(summaries[1].get(sp,0.0)-summaries[0].get(sp,0.0)) for sp in SPACE_ORDER}
+            pair_fp=stable_fingerprint([content_fp,states[0].form,states[1].form],"group")
+            examples.append(_training_example(
+                run_id,"PAIR_STATE_DELTA","mul" if states[0].language!=states[1].language else states[0].language,
+                {"a":{"text":states[0].form,"language":states[0].language,"state":states[0].typed_spaces},
+                 "b":{"text":states[1].form,"language":states[1].language},
+                 "experiment_mode":experiment_mode},
+                {"space_delta_b_minus_a":delta,"b_state":states[1].typed_spaces},
+                {"a_validation":asdict(states[0].validation),"b_validation":asdict(states[1].validation),
+                 "comparison":extra_metadata.get("comparison",{})},
+                min(states[0].validation.confidence,states[1].validation.confidence),
+                "PROVISIONAL_PAIR",pair_fp,True,"",
+                hierarchy_level="PAIR",supervision_kind="CONTRASTIVE_STATE_TRANSITION",
+                source_type="STATE_PAIR",target_type="TYPED_STATE_DELTA",
+            ))
+            examples.append(_training_example(
+                run_id,"MEANING_FRAME_CONTRAST",states[0].language,
+                {"a":states[0].form,"b":states[1].form},
+                {"a_frames":[asdict(f) for f in states[0].meaningFrames],
+                 "b_frames":[asdict(f) for f in states[1].meaningFrames],
+                 "comparison":compare_meaning_frames(states[0],states[1])},
+                {"experiment_mode":experiment_mode},
+                min(states[0].validation.confidence,states[1].validation.confidence),
+                "PROVISIONAL_CONTRAST",pair_fp,
+                bool(states[0].meaningFrames or states[1].meaningFrames),
+                "both meaning-frame sets unresolved" if not (states[0].meaningFrames or states[1].meaningFrames) else "",
+                hierarchy_level="PAIR",supervision_kind="CONTRASTIVE_CLASSIFICATION",
+                source_type="UTTERANCE_PAIR",target_type="MEANING_FRAME_DELTA",
+            ))
+            if experiment_mode=="Word ↔ Word":
+                examples.append(_training_example(
+                    run_id,"WORD_TRANSFORMATION",states[0].language,
+                    {"source_word":states[0].form,"source_state":states[0].typed_spaces,
+                     "target_word":states[1].form},
+                    {"target_state":states[1].typed_spaces,"delta":delta,
+                     "relations":extra_metadata.get("comparison",{})},
+                    {"mode":experiment_mode,"typed_relation_required":True},
+                    min(states[0].validation.confidence,states[1].validation.confidence),
+                    "PROVISIONAL_TRANSFORMATION",pair_fp,True,"",
+                    hierarchy_level="WORD_PAIR",supervision_kind="STATE_TRANSITION",
+                    source_type="WORD_STATE+TARGET_CARRIER",target_type="WORD_STATE_DELTA",
+                ))
+                examples.append(_training_example(
+                    run_id,"CONTRASTIVE_STATE_RANKING",states[0].language,
+                    {"anchor":states[0].form,"candidate":states[1].form},
+                    {"typed_delta":delta,"comparison":extra_metadata.get("comparison",{})},
+                    {"similarity_is_not_relation":True},
+                    min(states[0].validation.confidence,states[1].validation.confidence),
+                    "PROVISIONAL_CONTRAST",pair_fp,True,"",
+                    hierarchy_level="WORD_PAIR",supervision_kind="CONTRASTIVE_RANKING",
+                    source_type="WORD_STATE_PAIR",target_type="TYPED_CONTRAST",
+                ))
+            elif experiment_mode=="Utterance ↔ Utterance":
+                examples.append(_training_example(
+                    run_id,"UTTERANCE_TRANSFORMATION",states[0].language,
+                    {"source_text":states[0].form,"source_state":states[0].typed_spaces,
+                     "target_text":states[1].form},
+                    {"target_state":states[1].typed_spaces,"delta":delta,
+                     "frame_contrast":compare_meaning_frames(states[0],states[1])},
+                    {"mode":experiment_mode},
+                    min(states[0].validation.confidence,states[1].validation.confidence),
+                    "PROVISIONAL_TRANSFORMATION",pair_fp,True,"",
+                    hierarchy_level="UTTERANCE_PAIR",supervision_kind="STATE_TRANSITION",
+                    source_type="UTTERANCE_STATE+TARGET_CARRIER",target_type="UTTERANCE_STATE_DELTA",
+                ))
+
+        group_fp=stable_fingerprint({"content":content_fp,"members":[s.form for s in states]},"group")
+        reference={sp:mean([summary.get(sp,0.0) for summary in summaries],0.0) for sp in SPACE_ORDER}
+        cross_task={
+            "Word → Many Languages":"CROSS_LANGUAGE_LEXICAL_ALIGNMENT",
+            "Utterance → Many Languages":"CROSS_LANGUAGE_FRAME_ALIGNMENT",
+        }.get(experiment_mode)
+        if cross_task:
+            cross_conf=min([s.validation.confidence for s in states])
+            examples.append(_training_example(
+                run_id,cross_task,"mul",
+                [{"text":s.form,"language":s.language,"native_state":s.typed_spaces} for s in states],
+                {"alignment":extra_metadata.get("alignment",{}),
+                 "invariant":extra_metadata.get("invariant",{}),"reference_state":reference},
+                {"native_maps":[m.language for m in language_maps],"mode":experiment_mode},
+                cross_conf,"PROVISIONAL_CROSS_LANGUAGE",group_fp,True,"",
+                hierarchy_level="MULTILINGUAL_GROUP",source_type="INDEPENDENT_NATIVE_STATES",
+                target_type="LEXICAL_ALIGNMENT" if experiment_mode.startswith("Word") else "MEANING_FRAME_ALIGNMENT",
+            ))
+        for state,summary in zip(states,summaries):
+            residual={sp:float(summary.get(sp,0.0)-reference[sp]) for sp in SPACE_ORDER}
+            examples.append(_training_example(
+                run_id,"RESIDUAL_PREDICTION",state.language,
+                {"member":state.form,"member_state":state.typed_spaces,
+                 "group_reference":reference,"experiment_mode":experiment_mode},
+                {"residual":residual},
+                {"validation":asdict(state.validation),"alignment":extra_metadata.get("alignment",{})},
+                state.validation.confidence,"PROVISIONAL_RESIDUAL",group_fp,True,"",
+                hierarchy_level="MULTILINGUAL_GROUP",supervision_kind="REGRESSION",
+                source_type="MEMBER_STATE+GROUP_REFERENCE",target_type="RESIDUAL_VECTOR",
+            ))
+
+        if extra_metadata.get("alignment"):
+            examples.append(_training_example(
+                run_id,"CROSS_MEMBER_ALIGNMENT","mul",
+                [{"text":s.form,"language":s.language,"typed_spaces":s.typed_spaces} for s in states],
+                extra_metadata.get("alignment"),
+                {"mode":experiment_mode,"native_maps":[m.language for m in language_maps]},
+                min([s.validation.confidence for s in states]),"CANDIDATE_ALIGNMENT",group_fp,True,"",
+                hierarchy_level="MULTILINGUAL_GROUP",source_type="INDEPENDENT_NATIVE_STATES",
+                target_type="ALIGNMENT_STATE",
+            ))
+        if extra_metadata.get("invariant"):
+            inv=extra_metadata.get("invariant",{})
+            inv_conf=float(inv.get("confidence",0.0)) if isinstance(inv,dict) else 0.0
+            examples.append(_training_example(
+                run_id,"INVARIANT_EXTRACTION","mul",
+                [{"text":s.form,"language":s.language,"typed_spaces":s.typed_spaces} for s in states],inv,
+                {"alignment":extra_metadata.get("alignment",{}),"mode":experiment_mode},
+                inv_conf,"CANDIDATE_INVARIANT",group_fp,inv_conf>=.60,
+                "invariant confidence below gate" if inv_conf<.60 else "",
+                hierarchy_level="MULTILINGUAL_GROUP",source_type="ALIGNED_STATE_SET",
+                target_type="INVARIANT_CANDIDATE",
+            ))
+
+    for row in extra_metadata.get("coordinate_alignment",[]) if isinstance(extra_metadata.get("coordinate_alignment",[]),list) else []:
+        examples.append(_training_example(
+            run_id,"LANGUAGE_MAP_COORDINATE_ALIGNMENT","mul",
+            {"language_maps":[m.language for m in language_maps],"coordinate_pair":row},row,
+            {"mode":experiment_mode},float(row.get("coherence",row.get("similarity",.5)) or .5),
+            "PROVISIONAL_MAP_ALIGNMENT",content_fp,True,"",
+            hierarchy_level="LANGUAGE_PAIR",source_type="LANGUAGE_MAP_PAIR",
+            target_type="COORDINATE_ALIGNMENT",
+        ))
+
+    if experiment_mode=="Language Map ↔ Language Map" and len(language_maps)==2:
+        map_fp=stable_fingerprint([content_fp,language_maps[0].language,language_maps[1].language],"group")
+        examples.append(_training_example(
+            run_id,"NATIVE_MECHANIC_CONTRAST","mul",
+            {"map_a":{"language":language_maps[0].language,"mechanics":language_maps[0].nativeMechanics},
+             "map_b":{"language":language_maps[1].language,"mechanics":language_maps[1].nativeMechanics}},
+            {"shared_native_geometry":extra_metadata.get("shared_native_geometry",[])},
+            {"a_validation":asdict(language_maps[0].validation),"b_validation":asdict(language_maps[1].validation)},
+            min(language_maps[0].validation.confidence,language_maps[1].validation.confidence),
+            "PROVISIONAL_MAP_CONTRAST",map_fp,True,"",
+            hierarchy_level="LANGUAGE_PAIR",supervision_kind="CONTRASTIVE_CLASSIFICATION",
+            source_type="LANGUAGE_MAP_PAIR",target_type="NATIVE_MECHANIC_CONTRAST",
+        ))
+        for lm in language_maps:
+            examples.append(_training_example(
+                run_id,"ALIGNMENT_INTERFACE_PREDICTION",lm.language,
+                {"language_map":lm.id,"native_mechanics":lm.nativeMechanics,
+                 "native_metrics":lm.nativeMetrics},lm.alignmentInterfaces,
+                {"provenance":asdict(lm.provenance),"validation":asdict(lm.validation)},
+                lm.validation.confidence,"PROVISIONAL_NATIVE_MAP",map_fp,True,"",
+                hierarchy_level="LANGUAGE",source_type="LANGUAGE_MAP_STATE",
+                target_type="ALIGNMENT_INTERFACE_SET",
+            ))
+
+    discovery=extra_metadata.get("discovery") or {}
+    if isinstance(discovery,dict):
+        discovery_specs=[
+            ("coordinate_candidates","COORDINATE_CANDIDATE","CANDIDATE_NEW_COORDINATE"),
+            ("gap_candidates","GAP_CLASSIFICATION","PERSISTENT_GAP_CANDIDATE"),
+            ("term_proposals","TERM_REQUIREMENT","TERM_PROPOSAL_WARRANTED"),
+        ]
+        for field_name,task,status in discovery_specs:
+            for candidate in discovery.get(field_name,[]) or []:
+                confidence=float(candidate.get("novelty_score",candidate.get("persistence",1.0-candidate.get("residual_pressure",.5)))) if isinstance(candidate,dict) else .5
+                examples.append(_training_example(
+                    run_id,task,str(candidate.get("language","mul")) if isinstance(candidate,dict) else "mul",
+                    {"experiment":content_descriptor,"diagnostics":discovery.get("diagnostics",{})},candidate,
+                    {"excluded_coordinates":discovery.get("excluded_coordinates",[])},
+                    confidence,status,content_fp,False,
+                    "discovery candidates require independent validation",
+                    hierarchy_level="STRUCTURAL_DISCOVERY",source_type="UNEXPLAINED_STRUCTURE",
+                    target_type=status,
+                ))
+                if field_name=="term_proposals" and experiment_mode in {"Word → Many Languages","Utterance → Many Languages"}:
+                    gap_task="LEXICAL_GAP_DETECTION" if experiment_mode.startswith("Word") else "UNTRANSLATABLE_STRUCTURE"
+                    examples.append(_training_example(
+                        run_id,gap_task,str(candidate.get("language","mul")),
+                        {"multilingual_members":[{"text":s.form,"language":s.language} for s in states],
+                         "candidate":candidate},
+                        {"gap_present":True,"proposal":candidate},
+                        {"invariant":extra_metadata.get("invariant",{}),"residuals":extra_metadata.get("residuals",[])},
+                        confidence,"CANDIDATE_LEXICALIZATION_GAP",content_fp,False,
+                        "lexicalization gap requires native-language adjudication",
+                        hierarchy_level="MULTILINGUAL_GROUP",supervision_kind="GAP_CLASSIFICATION",
+                        source_type="MULTILINGUAL_STATE_SET",target_type="LEXICALIZATION_GAP",
+                    ))
+        for rejected in discovery.get("excluded_coordinates",[]) or []:
+            examples.append(_training_example(
+                run_id,"REJECTED_COORDINATE_HARD_NEGATIVE","mul",
+                {"candidate_coordinate":rejected,"experiment":content_descriptor},
+                {"admit_to_registry":False},
+                {"diagnostics":discovery.get("diagnostics",{})},1.0,"REJECTED_BY_GATE",
+                content_fp,True,"",hierarchy_level="STRUCTURAL_DISCOVERY",
+                supervision_kind="HARD_NEGATIVE",source_type="COORDINATE_CANDIDATE",
+                target_type="REGISTRY_ADMISSION_DECISION",is_negative=True,
+            ))
+
+    benchmark=extra_metadata.get("intelligence_report") or {}
+    if isinstance(benchmark,dict):
+        for profile in benchmark.get("language_profiles",[]) or []:
+            examples.append(_training_example(
+                run_id,"LANGUAGE_PROFILE",str(profile.get("language","und")),
+                {"language":profile.get("language"),"benchmark_id":benchmark.get("id")},profile,
+                {"utterance_count":profile.get("utterance_count"),"status":profile.get("status")},
+                float(profile.get("validation_confidence",0.0)),str(profile.get("status","PROVISIONAL")),
+                content_fp,False,"benchmark profiles require corpus/version adjudication",
+                hierarchy_level="BENCHMARK",source_type="LANGUAGE_BENCHMARK_CORPUS",
+                target_type="LANGUAGE_INTELLIGENCE_PROFILE",
+            ))
+        for finding in benchmark.get("findings",[]) or []:
+            severity=str(finding.get("severity","LOW"))
+            examples.append(_training_example(
+                run_id,"ANALYZER_FAILURE_PREDICTION",str(finding.get("language","mul")),
+                {"utterance":finding.get("utterance",""),"language":finding.get("language")},
+                {"failure_category":finding.get("category"),"severity":severity,
+                 "label":finding.get("label")},finding,
+                {"HIGH":.9,"MEDIUM":.75,"LOW":.6}.get(severity,.5),
+                str(finding.get("status","PROVISIONAL")),content_fp,True,"",
+                hierarchy_level="BENCHMARK",supervision_kind="FAILURE_CLASSIFICATION",
+                source_type="ANALYZER_INPUT",target_type="FAILURE_LABEL",is_negative=True,
+            ))
+            examples.append(_training_example(
+                run_id,"FALSIFICATION_REPAIR",str(finding.get("language","mul")),
+                {"utterance":finding.get("utterance",""),"failure":finding},
+                {"recommended_repair":finding.get("recommendation","")},
+                {"benchmark_id":benchmark.get("id"),"category":finding.get("category")},
+                {"HIGH":.9,"MEDIUM":.75,"LOW":.6}.get(severity,.5),
+                str(finding.get("status","PROVISIONAL")),content_fp,False,
+                "benchmark repair requires adjudicated target",
+                hierarchy_level="BENCHMARK",supervision_kind="FAILURE_DRIVEN_REPAIR",
+                source_type="FAILED_ANALYSIS",target_type="REPAIR_ACTION",is_negative=True,
+            ))
+
+    coordinate_known=[not r["is_unknown"] for r in coordinate_facts]
+    validation_scores=[s.validation.confidence for s in states]+[m.validation.confidence for m in language_maps]
+    comprehension_scores=[
+        s.comprehensionCertificate.comprehension_score
+        for s in states if s.comprehensionCertificate
+    ]
+    uncertainty_scores=[s.uncertainty.entropy_proxy for s in states]
+    counts={
+        "language_maps":len(language_maps),"utterances":len(states),
+        "tokens":sum(len(s.tokens) for s in states),
+        "words":sum(len(derive_word_states(s)) for s in states),
+        "objects":len(objects),"coordinate_facts":len(coordinate_facts),
+        "edge_facts":len(edge_facts),"metadata_facts":len(metadata_facts),
+        "training_candidates":len(examples),
+        "training_default_eligible":sum(bool(x["eligible_by_default"]) for x in examples),
+        "training_rejected_or_review":sum(not bool(x["eligible_by_default"]) for x in examples),
+        "training_hard_negatives":sum(bool(x.get("is_negative")) for x in examples),
+        "training_task_types":len({x["task_type"] for x in examples}),
+    }
+    quality={
+        "coordinate_known_rate":mean(coordinate_known,0.0),
+        "mean_validation_confidence":mean(validation_scores,0.0),
+        "mean_comprehension_support":mean(comprehension_scores,0.0),
+        "mean_uncertainty_entropy":mean(uncertainty_scores,0.0),
+        "frame_coverage":mean([bool(s.meaningFrames) for s in states],0.0),
+        "training_eligibility_rate":mean([bool(x["eligible_by_default"]) for x in examples],0.0),
+    }
+    manifest=DatasetRunManifest(
+        run_id=run_id,schema_version=ATLAS_DATA_SCHEMA_VERSION,
+        app_version=APP_TITLE,created_at=created,experiment_mode=experiment_mode,
+        content_fingerprint=content_fp,configuration=configuration,
+        counts=counts,quality=quality,
+        provenance={
+            "generator":"ATLAS_DATA_METADATA_PIPELINE",
+            "source_modes":[experiment_mode],
+            "epistemic_policy":"unknown != zero; shared default != invariant",
+            "extra_metadata":extra_metadata,
+        },
+    )
+    return AtlasDatasetRun(
+        manifest=manifest,objects=objects,coordinate_facts=coordinate_facts,
+        edge_facts=edge_facts,metadata_facts=metadata_facts,
+        training_examples=examples,
+        snapshots={
+            "utterance_states":[asdict(s) for s in states],
+            "word_states":[asdict(w) for s in states for w in derive_word_states(s)],
+            "language_maps":[asdict(m) for m in language_maps],
+            "extra_metadata":extra_metadata,
+            "training_contract":MODE_TRAINING_CONTRACTS.get(experiment_mode,{}),
+        },
+    )
+
+def register_atlas_dataset_run(experiment_mode: str,
+                               states: list[UtteranceState] | None = None,
+                               language_maps: list[LanguageMapState] | None = None,
+                               configuration: dict[str,Any] | None = None,
+                               extra_metadata: dict[str,Any] | None = None) -> AtlasDatasetRun:
+    run=build_atlas_dataset_run(
+        experiment_mode,states,language_maps,configuration,extra_metadata
+    )
+    st.session_state.setdefault("atlas_dataset_ledger",[])
+    serialized=asdict(run)
+    st.session_state["atlas_dataset_ledger"].append(serialized)
+    st.session_state["atlas_last_dataset_run"]=serialized
+    store=active_atlas_store()
+    if store is not None:
+        store.persist_run(run)
+    return run
+
+def atlas_dataset_tables(runs: list[dict[str,Any]]) -> dict[str,pd.DataFrame]:
+    keys=["objects","coordinate_facts","edge_facts","metadata_facts","training_examples"]
+    out={}
+    for key in keys:
+        rows=[]
+        for run in runs:
+            rows.extend(run.get(key,[]))
+        out[key]=pd.DataFrame(rows)
+    out["manifests"]=pd.DataFrame([r.get("manifest",{}) for r in runs])
+    return out
+
+def atlas_dataset_summary(runs: list[dict[str,Any]],
+                          tables: dict[str,pd.DataFrame]) -> dict[str,Any]:
+    objects=tables["objects"]
+    coords=tables["coordinate_facts"]
+    edges=tables["edge_facts"]
+    examples=tables["training_examples"]
+    fingerprints=[r.get("manifest",{}).get("content_fingerprint","") for r in runs]
+    return {
+        "runs":len(runs),
+        "unique_run_contents":len(set(fingerprints)),
+        "duplicate_runs":max(0,len(fingerprints)-len(set(fingerprints))),
+        "languages":int(objects["language"].nunique()) if not objects.empty and "language" in objects else 0,
+        "objects":len(objects),"coordinate_facts":len(coords),"edge_facts":len(edges),
+        "metadata_facts":len(tables["metadata_facts"]),
+        "training_candidates":len(examples),
+        "training_default_eligible":int(examples["eligible_by_default"].sum()) if not examples.empty else 0,
+        "training_task_types":int(examples["task_type"].nunique()) if not examples.empty else 0,
+        "training_hard_negatives":int(examples.get("is_negative",pd.Series(dtype=bool)).fillna(False).astype(bool).sum()) if not examples.empty else 0,
+    }
+
+def atlas_coverage_matrix(coords: pd.DataFrame) -> pd.DataFrame:
+    if coords.empty:
+        return pd.DataFrame()
+    work=coords.copy()
+    work["known"]=~work["is_unknown"].astype(bool)
+    return work.pivot_table(
+        index="language",columns="space",values="known",aggfunc="mean",fill_value=0.0
+    ).reindex(columns=[s for s in SPACE_ORDER if s in set(work["space"])])
+
+def atlas_drift_table(coords: pd.DataFrame, manifests: pd.DataFrame) -> pd.DataFrame:
+    if coords.empty or manifests.empty or len(manifests)<2:
+        return pd.DataFrame()
+    run_order={rid:i for i,rid in enumerate(manifests.sort_values("created_at")["run_id"].tolist())}
+    rows=[]
+    keys=["carrier_fingerprint","object_type","language","space","coordinate"]
+    for key,group in coords.groupby(keys,dropna=False):
+        group=group.copy()
+        group["_order"]=group["run_id"].map(run_order)
+        group=group.sort_values("_order").drop_duplicates("run_id",keep="last")
+        recs=group.to_dict(orient="records")
+        for a,b in zip(recs,recs[1:]):
+            delta=float(b["value"])-float(a["value"])
+            rows.append({
+                **dict(zip(keys,key)),"run_from":a["run_id"],"run_to":b["run_id"],
+                "value_from":a["value"],"value_to":b["value"],
+                "delta":delta,"abs_delta":abs(delta),
+                "evidence_from":a["evidence_class"],"evidence_to":b["evidence_class"],
+            })
+    if not rows:
+        return pd.DataFrame()
+    return pd.DataFrame(rows).sort_values("abs_delta",ascending=False)
+
+def make_data_lineage_sankey(objects: pd.DataFrame, coords: pd.DataFrame) -> go.Figure:
+    if objects.empty or coords.empty:
+        return go.Figure().update_layout(template="plotly_dark",title="No lineage data")
+    pairs=coords.groupby(["object_type","space","evidence_class"]).size().reset_index(name="count")
+    if len(pairs)>120:
+        pairs=pairs.sort_values("count",ascending=False).head(120)
+    object_nodes=[f"OBJECT::{x}" for x in sorted(pairs["object_type"].unique())]
+    space_nodes=[f"SPACE::{x}" for x in sorted(pairs["space"].unique())]
+    evidence_nodes=[f"EVIDENCE::{x}" for x in sorted(pairs["evidence_class"].unique())]
+    nodes=object_nodes+space_nodes+evidence_nodes
+    index={n:i for i,n in enumerate(nodes)}
+    first=pairs.groupby(["object_type","space"])["count"].sum().reset_index()
+    second=pairs.groupby(["space","evidence_class"])["count"].sum().reset_index()
+    sources=[];targets=[];values=[]
+    for _,r in first.iterrows():
+        sources.append(index[f"OBJECT::{r.object_type}"])
+        targets.append(index[f"SPACE::{r.space}"])
+        values.append(int(r["count"]))
+    for _,r in second.iterrows():
+        sources.append(index[f"SPACE::{r.space}"])
+        targets.append(index[f"EVIDENCE::{r.evidence_class}"])
+        values.append(int(r["count"]))
+    fig=go.Figure(go.Sankey(
+        node=dict(label=[n.split("::",1)[1] for n in nodes],pad=12,thickness=14),
+        link=dict(source=sources,target=targets,value=values)
+    ))
+    fig.update_layout(template="plotly_dark",height=650,title="ATLAS lineage: carrier → typed space → evidence class")
+    return fig
+
+def atlas_dataset_bundle(runs: list[dict[str,Any]]) -> dict[str,Any]:
+    tables=atlas_dataset_tables(runs)
+    return {
+        "schema_version":ATLAS_DATA_SCHEMA_VERSION,
+        "generated_at":datetime.now(timezone.utc).isoformat(),
+        "generator":APP_TITLE,
+        "summary":atlas_dataset_summary(runs,tables),
+        "runs":json_safe(runs),
+    }
+
+def atlas_dataset_zip(runs: list[dict[str,Any]]) -> bytes:
+    tables=atlas_dataset_tables(runs)
+    bundle=atlas_dataset_bundle(runs)
+    out=io.BytesIO()
+    with zipfile.ZipFile(out,"w",compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr("atlas_dataset_bundle.json",json.dumps(bundle,ensure_ascii=False,indent=2))
+        for name,df in tables.items():
+            z.writestr(f"tables/{name}.csv",df.to_csv(index=False))
+        examples=tables["training_examples"].to_dict(orient="records") if not tables["training_examples"].empty else []
+        z.writestr("training/atlas_training_candidates.jsonl","\n".join(
+            json.dumps(json_safe(x),ensure_ascii=False) for x in examples
+        ))
+        eligible=[x for x in examples if bool(x.get("eligible_by_default"))]
+        z.writestr("training/atlas_training_default_eligible.jsonl","\n".join(
+            json.dumps(json_safe(x),ensure_ascii=False) for x in eligible
+        ))
+        rejected=[x for x in examples if not bool(x.get("eligible_by_default"))]
+        z.writestr("training/atlas_training_rejected_or_review.jsonl","\n".join(
+            json.dumps(json_safe(x),ensure_ascii=False) for x in rejected
+        ))
+        for split in ("train","validation","test"):
+            split_rows=[x for x in eligible if x.get("split",deterministic_dataset_split(x.get("group_fingerprint","")))==split]
+            z.writestr(f"training/splits/{split}.jsonl","\n".join(
+                json.dumps(json_safe(x),ensure_ascii=False) for x in split_rows
+            ))
+        task_types=sorted({str(x.get("task_type","UNKNOWN")) for x in examples})
+        for task in task_types:
+            safe_task=re.sub(r"[^A-Za-z0-9_.-]+","_",task)
+            rows=[x for x in examples if str(x.get("task_type"))==task]
+            z.writestr(f"training/by_task/{safe_task}.jsonl","\n".join(
+                json.dumps(json_safe(x),ensure_ascii=False) for x in rows
+            ))
+        dataset_card={
+            "schema":ATLAS_DATA_SCHEMA_VERSION,
+            "generator":APP_TITLE,
+            "summary":bundle["summary"],
+            "task_types":task_types,
+            "hierarchy_levels":sorted({str(x.get("hierarchy_level","UNKNOWN")) for x in examples}),
+            "splitting":"80/10/10 deterministic by group_fingerprint; carrier groups never cross splits",
+            "eligibility":"default-eligible examples pass current evidence gates; rejected/review remains preserved",
+            "epistemic_policy":[
+                "unknown is not zero","similarity is not a typed relation",
+                "display projection is not native state","candidate is not validated fact",
+            ],
+            "mode_contracts":MODE_TRAINING_CONTRACTS,
+        }
+        z.writestr("DATASET_CARD.json",json.dumps(dataset_card,ensure_ascii=False,indent=2))
+        z.writestr("README.txt",(
+            "ATLAS training-data foundry bundle\n"
+            "Unknown is not zero. Shared default is not an invariant.\n"
+            "Training candidates preserve provenance, evidence class, confidence, "
+            "group fingerprints, deterministic splits, negative examples, and eligibility gates.\n"
+        ))
+    return out.getvalue()
+
+def merge_atlas_dataset_bundle(payload: dict[str,Any]) -> tuple[int,int]:
+    if payload.get("schema_version") not in {ATLAS_DATA_SCHEMA_VERSION,"ATLAS_DATA_BUNDLE_v1.1"}:
+        raise ValueError(f"Unsupported schema: {payload.get('schema_version')}")
+    incoming=payload.get("runs",[])
+    if not isinstance(incoming,list):
+        raise ValueError("Bundle runs must be a list")
+    current=st.session_state.setdefault("atlas_dataset_ledger",[])
+    existing={r.get("manifest",{}).get("run_id") for r in current}
+    store=active_atlas_store()
+    added=0
+    for run in incoming:
+        rid=run.get("manifest",{}).get("run_id")
+        if not rid or rid in existing:
+            continue
+        current.append(run); existing.add(rid); added+=1
+        if store is not None:
+            store.persist_run(run)
+    return added,len(incoming)-added
+
+def parse_source_records(filename: str,raw_payload: bytes,
+                         source_type: str,default_language: str) -> list[dict[str,Any]]:
+    """Parse source material without silently asserting its semantic authority."""
+    suffix=Path(filename).suffix.casefold()
+    if suffix in {".csv",".tsv"}:
+        sep="\t" if suffix==".tsv" else ","
+        records=pd.read_csv(io.BytesIO(raw_payload),sep=sep).fillna("").to_dict(orient="records")
+    elif suffix==".jsonl":
+        records=[json.loads(line) for line in raw_payload.decode("utf-8").splitlines() if line.strip()]
+    elif suffix==".json":
+        payload=json.loads(raw_payload.decode("utf-8"))
+        if isinstance(payload,list):
+            records=payload
+        elif isinstance(payload,dict) and isinstance(payload.get("records"),list):
+            records=payload["records"]
+        else:
+            records=[payload]
+    else:
+        records=[{"text":line} for line in raw_payload.decode("utf-8",errors="replace").splitlines() if line.strip()]
+
+    normalized=[]
+    for record in records:
+        if not isinstance(record,dict):
+            record={"value":record}
+        item={str(k):json_safe(v) for k,v in record.items()}
+        item.setdefault("language",default_language)
+        item.setdefault("record_type",source_type)
+        item.setdefault("status","IMPORTED_UNVALIDATED")
+        # Normalize common lexical-resource field names while retaining originals.
+        if source_type in {"dictionary","thesaurus","ontology","lexical_graph"}:
+            item.setdefault("lemma",item.get("word",item.get("headword",item.get("source",""))))
+            item.setdefault("relation",item.get("relation_type",item.get("predicate","DEFINITION" if item.get("definition") else "UNSPECIFIED")))
+            item.setdefault("target",item.get("related_word",item.get("object",item.get("definition",""))))
+        normalized.append(item)
+    return normalized
+
+def build_source_artifact(filename: str,raw_payload: bytes,source_type: str,
+                          title: str,language: str,uri: str,license_name: str,
+                          version: str,parser: str,records: list[dict[str,Any]]) -> AtlasSourceArtifact:
+    content_hash=f"sha256:{hashlib.sha256(raw_payload).hexdigest()}"
+    return AtlasSourceArtifact(
+        source_id=stable_fingerprint({"content_hash":content_hash,"source_type":source_type},"source"),
+        source_type=source_type,title=title or filename,language=language,uri=uri,
+        license=license_name or "UNKNOWN",version=version or "UNSPECIFIED",
+        content_hash=content_hash,retrieved_at=datetime.now(timezone.utc).isoformat(),
+        parser=parser,evidence_class="IMPORTED_SOURCE",record_count=len(records),
+        metadata={
+            "filename":filename,"bytes":len(raw_payload),
+            "field_inventory":sorted({k for r in records for k in r}),
+            "authority_not_inferred":True,
+        },
+    )
+
+def atlas_view_recommendations(question: str,tables: dict[str,pd.DataFrame],
+                               run_count: int,source_count: int = 0) -> pd.DataFrame:
+    q=question.casefold()
+    rows=[]
+    def add(view,reason,inputs,priority):
+        rows.append({"recommended_view":view,"reason":reason,"required_data":inputs,"priority":priority})
+    if any(x in q for x in ("missing","coverage","gap","unknown")) or not question.strip():
+        add("coverage heatmap","Shows observed versus unknown coordinates across language and space.","coordinate facts + evidence classes",1)
+    if any(x in q for x in ("change","drift","version","over time")) or run_count>1:
+        add("drift ledger + trajectory","Preserves direction and magnitude of coordinate changes for stable carriers.","run manifests + carrier fingerprints",1)
+    if any(x in q for x in ("relation","network","connect","graph")):
+        add("typed relation network","Displays relation and hyperrelation structure without collapsing edge types.","edge facts",1)
+    if any(x in q for x in ("source","evidence","provenance","trust")) or source_count:
+        add("lineage Sankey + source catalog","Makes the path from source artifact to derived coordinate visible.","sources + lineage + metadata",1)
+    if any(x in q for x in ("compare","language","difference","similar")):
+        add("language × space comparison matrix","Separates shared observed geometry from non-comparable coordinates.","language maps + coordinate facts",1)
+    if any(x in q for x in ("train","dataset","supervision","example")):
+        add("training gate dashboard","Shows eligible, excluded, and uncertain examples by task and evidence status.","training candidates + provenance",1)
+    if any(x in q for x in ("uncertainty","confidence","calibration","wrong")):
+        add("confidence–uncertainty calibration plot","Reveals unsupported confidence and poorly calibrated analyzers.","validation + uncertainty metadata",1)
+    if any(x in q for x in ("distribution","cluster","geometry","manifold")):
+        add("typed-space distribution + projection pair","Shows native values beside a non-authoritative display projection.","coordinate facts + embeddings",2)
+    if not rows:
+        add("inventory table + faceted bars","A safe first view when no analytic question has selected a geometry.","objects + facts",2)
+    return pd.DataFrame(rows).sort_values(["priority","recommended_view"])
+
+def materialize_atlas_product(name: str,product_type: str,
+                              tables: dict[str,pd.DataFrame],runs: list[dict[str,Any]],
+                              source_product_ids: list[str] | None = None,
+                              min_training_confidence: float = .60) -> AtlasDataProduct:
+    source_product_ids=source_product_ids or []
+    query_spec={"product_type":product_type,"min_training_confidence":min_training_confidence}
+    if product_type=="LANGUAGE_SPACE_COVERAGE":
+        matrix=atlas_coverage_matrix(tables["coordinate_facts"])
+        payload={"index":list(matrix.index),"columns":list(matrix.columns),"values":matrix.values.tolist()}
+    elif product_type=="RELATION_INVENTORY":
+        e=tables["edge_facts"]
+        payload=(e.groupby(["language","edge_type","relation","space","status"]).size().reset_index(name="count").to_dict(orient="records") if not e.empty else [])
+    elif product_type=="TRAINING_CORPUS":
+        t=tables["training_examples"]
+        if not t.empty:
+            t=t[(t["eligible_by_default"].astype(bool)) & (t["confidence"]>=min_training_confidence)]
+        payload=t.to_dict(orient="records")
+    elif product_type=="GAP_ACQUISITION_QUEUE":
+        c=tables["coordinate_facts"]
+        if c.empty:
+            payload=[]
+        else:
+            gap=c.groupby(["language","space","evidence_class","is_unknown"]).size().reset_index(name="count")
+            gap["priority"]=gap["count"]*(gap["is_unknown"].astype(bool).astype(int)+1)
+            payload=gap.sort_values("priority",ascending=False).to_dict(orient="records")
+    elif product_type=="RUN_DRIFT":
+        payload=atlas_drift_table(tables["coordinate_facts"],tables["manifests"]).to_dict(orient="records")
+    else:
+        payload=atlas_dataset_summary(runs,tables)
+    source_run_ids=[r.get("manifest",{}).get("run_id","") for r in runs]
+    descriptor={"name":name,"type":product_type,"query":query_spec,"payload":payload,
+                "source_runs":source_run_ids,"source_products":source_product_ids}
+    fingerprint=stable_fingerprint(descriptor,"product")
+    row_count=len(payload) if isinstance(payload,list) else (
+        len(payload.get("values",[])) if isinstance(payload,dict) else 1
+    )
+    quality={
+        "row_count":float(row_count),
+        "source_run_count":float(len(source_run_ids)),
+        "source_product_count":float(len(source_product_ids)),
+        "reproducible_query":1.0,
+    }
+    return AtlasDataProduct(
+        product_id=fingerprint,name=name,product_type=product_type,
+        created_at=datetime.now(timezone.utc).isoformat(),content_fingerprint=fingerprint,
+        query_spec=query_spec,source_run_ids=source_run_ids,
+        source_product_ids=source_product_ids,payload=json_safe(payload),quality=quality,
+        provenance={
+            "generator":"ATLAS_RECURSIVE_AGGREGATOR",
+            "schema_version":ATLAS_DATA_SCHEMA_VERSION,
+            "law":"aggregate is a versioned object, not a display side effect",
+        },
+    )
+
+
+# =============================================================================
 # Clean report engine
 # =============================================================================
 
@@ -5328,11 +7137,22 @@ def atlas_report_markdown(
             lines.append(f"- Speaker resolved: **{cert.speaker_resolved}**")
             lines.append(f"- Addressee resolved: **{cert.addressee_resolved}**")
             lines.append(f"- Scope resolved: **{cert.scope_resolved}**")
-            lines.append(f"- Certificate confidence: **{cert.confidence:.3f}**")
+            lines.append(f"- Structural coverage: **{cert.structural_coverage:.3f}**")
+            lines.append(f"- Semantic resolution: **{cert.semantic_resolution:.3f}**")
+            lines.append(f"- Comprehension score: **{cert.comprehension_score:.3f}**")
+            lines.append(f"- Certificate status: `{cert.status}`")
+            lines.append(
+                "- Score meaning: evidence-weighted support for the resolved frame; "
+                "not proof that ATLAS understands the utterance."
+            )
             if cert.ambiguities:
                 lines.append("- Ambiguities: " + "; ".join(cert.ambiguities))
             if cert.unresolved_items:
                 lines.append("- Unresolved: " + "; ".join(cert.unresolved_items))
+            if cert.falsification_tests:
+                lines.append("- Falsification tests:")
+                for test in cert.falsification_tests:
+                    lines.append(f"  - {test}")
         lines.append("")
 
     lines += ["## State Δ by Domain", ""]
@@ -5425,6 +7245,12 @@ def atlas_report_markdown(
         lines.append("")
 
     lines += ["## Typed-Space State", ""]
+    lines.append(
+        "> `COMP` is now computed from structural coverage and semantic resolution. "
+        "Token integration remains a labeled heuristic observation and is not averaged "
+        "into utterance comprehension."
+    )
+    lines.append("")
     for state in states:
         lines.append(f"### {state.form}")
         sm = space_summary(state.typed_spaces)
@@ -5555,6 +7381,7 @@ def atlas_report_markdown(
     lines.append("- Homophony requires pronunciation evidence and is not inferred from spelling.")
     lines.append("- Cognates, false friends, collocations and idioms require appropriate historical/corpus resources.")
     lines.append("- Candidate coordinates and terms remain hypotheses pending independent validation.")
+    lines.append("- Certificate confidence is bounded provisional support, not a claim of human-level comprehension.")
     lines.append("")
     return "\\n".join(lines)
 
@@ -5582,12 +7409,15 @@ st.markdown(
 
 st.title(APP_TITLE)
 st.caption(
-    "Language map → word/token → utterance → comparison/alignment → invariant/residual → ATLAS top layer."
+    "Generate typed states → construct supervised transformations/comparisons → preserve failures → export versioned training corpora."
 )
 
 with st.sidebar:
     st.header("Experiment")
-    mode = st.selectbox("Mode", EXPERIMENT_MODES)
+    mode = st.selectbox(
+        "Training-data generator",EXPERIMENT_MODES,
+        format_func=lambda value:MODE_DISPLAY_NAMES.get(value,value)
+    )
 
     st.divider()
     st.header("Embedding / NNS")
@@ -5606,6 +7436,29 @@ with st.sidebar:
     )
     seed = int(st.number_input("Random seed",0,999999,42))
 
+    st.divider()
+    st.header("ATLAS Data Spine")
+    persistence_enabled=st.toggle(
+        "Persist generated data",True,
+        help="Append experiment runs, sources, facts and aggregates to the ATLAS SQLite store."
+    )
+    atlas_db_path=st.text_input(
+        "ATLAS store path",DEFAULT_ATLAS_DB_PATH,
+        help="SQLite database used as the durable source of truth for generated data and metadata."
+    )
+    st.session_state["_atlas_persistence_enabled"]=persistence_enabled
+    st.session_state["_atlas_db_path"]=atlas_db_path
+
+contract=MODE_TRAINING_CONTRACTS[mode]
+with st.expander("Training supervision contract",expanded=True):
+    c1,c2=st.columns([1,2])
+    with c1:
+        st.markdown(f"**Generation unit:** {contract['unit']}")
+        st.markdown(f"**Admission gate:** {contract['gate']}")
+    with c2:
+        st.markdown("**Training records produced**")
+        st.code("\n".join(contract["produces"]))
+
 st.markdown(
     """
     <div class="atlas-law">
@@ -5623,6 +7476,74 @@ st.markdown(
 # Shared analysis rendering
 # =============================================================================
 
+def atlas_state_artifact(state: UtteranceState, lmap: LanguageMapState,
+                         embedding_model: str = "", top: TopLayerState | None = None) -> dict[str,Any]:
+    """Build the canonical, self-describing ATLAS state download artifact."""
+    top = top or top_layer_for([state],[lmap])
+    content = {
+        "top_layer":asdict(top),
+        "language_map":asdict(lmap),
+        "utterance_state":asdict(state),
+        "meaning_frames":[asdict(x) for x in state.meaningFrames],
+        "references":[asdict(x) for x in state.references],
+        "coreference":[asdict(x) for x in state.coreference],
+        "semantic_roles":[asdict(x) for x in state.semanticRoles],
+        "comprehension_certificate":asdict(state.comprehensionCertificate) if state.comprehensionCertificate else None,
+        "state_delta":asdict(state.stateDelta) if state.stateDelta else None,
+        "counterfactual_neighbors":[asdict(x) for x in state.counterfactualNeighbors],
+        "lexical_relations":lexical_edges_df(state).to_dict(orient="records"),
+        "lexical_senses":lexical_senses_df(state).to_dict(orient="records"),
+    }
+    return {
+        "schema":"ATLAS_STATE_ARTIFACT_v1",
+        "artifact_type":"ATLAS_TYPED_STATE",
+        "generated_at":datetime.now(timezone.utc).isoformat(),
+        "state_fingerprint":stable_fingerprint(content,"atlas_state"),
+        "generator":{
+            "application":APP_TITLE,
+            "embedding_model":embedding_model,
+            "epistemic_notice":(
+                "Typed coordinates may be heuristic or provisional. Embeddings are an "
+                "observation layer and display projections are not native ATLAS state."
+            ),
+        },
+        "reconstruction":{
+            "operation":"make_utterance_state",
+            "arguments":{"text":state.form,"language":state.language},
+        },
+        **content,
+    }
+
+def render_state_download_panel(state: UtteranceState, lmap: LanguageMapState,
+                                embedding_model: str = "", key_prefix: str = "state") -> None:
+    """Put the generated state—not an upload control—at the center of the workflow."""
+    artifact=atlas_state_artifact(state,lmap,embedding_model)
+    report=atlas_report_markdown(
+        [state],[lmap],title=f"ATLAS Report — {state.form}",embedding_model=embedding_model
+    )
+    st.markdown("### Download constructed state")
+    st.caption(
+        f"Ready: {artifact['state_fingerprint']} · complete typed state, data, metadata, "
+        "lineage-facing identifiers, and reconstruction arguments."
+    )
+    c1,c2,c3,c4=st.columns(4)
+    c1.download_button(
+        "Download state JSON",json.dumps(artifact,ensure_ascii=False,indent=2).encode("utf-8"),
+        "atlas_state.json","application/json",width="stretch",key=f"{key_prefix}_json"
+    )
+    c2.download_button(
+        "Download token CSV",token_state_df(state).to_csv(index=False).encode("utf-8"),
+        "atlas_token_states.csv","text/csv",width="stretch",key=f"{key_prefix}_tokens"
+    )
+    c3.download_button(
+        "Download relations CSV",lexical_edges_df(state).to_csv(index=False).encode("utf-8"),
+        "atlas_lexical_relations.csv","text/csv",width="stretch",key=f"{key_prefix}_relations"
+    )
+    c4.download_button(
+        "Download report",report.encode("utf-8"),"atlas_complete_report.md","text/markdown",
+        width="stretch",key=f"{key_prefix}_report"
+    )
+
 def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.ndarray,
                   embedding_model: str, latent=None, losses=None):
     top = top_layer_for([state],[lmap])
@@ -5635,7 +7556,9 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
     m[4].metric("Relations", len(state.relations))
     m[5].metric("Counterfactuals", len(state.counterfactualNeighbors))
     m[6].metric("Validation", state.validation.validationStatus)
-    m[7].metric("Comprehension", f"{state.comprehensionCertificate.confidence:.2f}" if state.comprehensionCertificate else "—")
+    m[7].metric("Comprehension support", f"{state.comprehensionCertificate.confidence:.2f}" if state.comprehensionCertificate else "—")
+
+    render_state_download_panel(state,lmap,embedding_model,"single_primary")
 
     tabs = st.tabs([
         "Clean Report","Meaning Frame","Reference + Roles","Counterfactuals",
@@ -5655,7 +7578,7 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
             "Download clean report",
             clean_report.encode("utf-8"),
             "atlas_clean_report.md","text/markdown",
-            use_container_width=True
+            width="stretch"
         )
 
     with tabs[1]:
@@ -5674,7 +7597,7 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
                 "direction":f.direction,
                 "confidence":f.confidence,
                 "status":f.status,
-            } for f in state.meaningFrames]),hide_index=True,use_container_width=True)
+            } for f in state.meaningFrames]),hide_index=True,width="stretch")
             for f in state.meaningFrames:
                 st.code(f.canonical_form)
         st.markdown("#### Comprehension certificate")
@@ -5683,7 +7606,7 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
     with tabs[2]:
         lookup = {ts.token.id:ts.token.surface for ts in state.tokens}
         st.markdown("#### Reference entities")
-        st.dataframe(pd.DataFrame([asdict(r) for r in state.references]),hide_index=True,use_container_width=True)
+        st.dataframe(pd.DataFrame([asdict(r) for r in state.references]),hide_index=True,width="stretch")
         st.markdown("#### Coreference")
         st.dataframe(pd.DataFrame([{
             "source":lookup.get(c.source,c.source),
@@ -5691,7 +7614,7 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
             "relation":c.relation,
             "confidence":c.confidence,
             "evidence":c.evidence
-        } for c in state.coreference]),hide_index=True,use_container_width=True)
+        } for c in state.coreference]),hide_index=True,width="stretch")
         st.markdown("#### Semantic roles")
         st.dataframe(pd.DataFrame([{
             "predicate":lookup.get(r.predicate,r.predicate),
@@ -5699,7 +7622,7 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
             "filler":lookup.get(r.filler,r.filler),
             "confidence":r.confidence,
             "evidence":r.evidence,
-        } for r in state.semanticRoles]),hide_index=True,use_container_width=True)
+        } for r in state.semanticRoles]),hide_index=True,width="stretch")
         st.markdown("#### State Δ")
         st.json(asdict(state.stateDelta) if state.stateDelta else {})
 
@@ -5714,7 +7637,7 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
                 "changed_dimensions":", ".join(n.changed_dimensions),
                 "expected_invariants":", ".join(n.expected_invariants),
                 "expected_changes":json.dumps(n.expected_changes,ensure_ascii=False),
-            } for n in state.counterfactualNeighbors]),hide_index=True,use_container_width=True,height=460)
+            } for n in state.counterfactualNeighbors]),hide_index=True,width="stretch",height=460)
             st.info("Lexical antonymy and grammatical negation are deliberately separate transformations.")
 
     with tabs[4]:
@@ -5727,12 +7650,12 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
             "This map is an active analysis interface. Its coordinates describe native "
             "language mechanics; missing coordinates remain unobserved rather than defaulting to 0.45/0.50."
         )
-        st.plotly_chart(native_language_map_graph(lmap),use_container_width=True)
+        st.plotly_chart(native_language_map_graph(lmap),width="stretch")
         map_rows=[]
         for sp,vals in lmap.typed_spaces.items():
             for coord,val in vals.items():
                 map_rows.append({"space":sp,"native_coordinate":coord,"value":val})
-        st.dataframe(pd.DataFrame(map_rows),hide_index=True,use_container_width=True,height=520)
+        st.dataframe(pd.DataFrame(map_rows),hide_index=True,width="stretch",height=520)
         cma,cmb=st.columns(2)
         with cma:
             st.markdown("#### Native mechanics / operators")
@@ -5753,8 +7676,8 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
     with tabs[6]:
         st.subheader("Full utterance state")
         st.code(state.form)
-        st.plotly_chart(make_space_bar(state, "Utterance typed-space state"), use_container_width=True)
-        st.dataframe(utterance_space_df(state),hide_index=True,use_container_width=True,height=560)
+        st.plotly_chart(make_space_bar(state, "Utterance typed-space state"), width="stretch")
+        st.dataframe(utterance_space_df(state),hide_index=True,width="stretch",height=560)
         c1,c2,c3 = st.columns(3)
         with c1:
             st.markdown("#### Candidate interpretations")
@@ -5790,43 +7713,43 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
                         "coordinate":list(ts.typed_spaces[sp].keys()),
                         "value":list(ts.typed_spaces[sp].values())
                     })
-                    st.dataframe(df,hide_index=True,use_container_width=True)
+                    st.dataframe(df,hide_index=True,width="stretch")
         st.markdown("#### All token-state rows")
-        st.dataframe(token_state_df(state),hide_index=True,use_container_width=True,height=560)
+        st.dataframe(token_state_df(state),hide_index=True,width="stretch",height=560)
 
     with tabs[8]:
         st.subheader("ATLAS Lexical Relation Map")
-        st.plotly_chart(lexical_graph(state),use_container_width=True)
+        st.plotly_chart(lexical_graph(state),width="stretch")
         lcov = lexical_coverage_df(state)
         ledges = lexical_edges_df(state)
         lsenses = lexical_senses_df(state)
         st.markdown("#### Relation coverage by word")
-        st.dataframe(lcov,hide_index=True,use_container_width=True,height=420)
+        st.dataframe(lcov,hide_index=True,width="stretch",height=420)
         st.markdown("#### Typed lexical edges")
         if ledges.empty:
             st.info("No dictionary-backed lexical relation edges were available.")
         else:
-            st.dataframe(ledges,hide_index=True,use_container_width=True,height=560)
+            st.dataframe(ledges,hide_index=True,width="stretch",height=560)
         st.markdown("#### Sense inventory")
         if lsenses.empty:
             st.info("No dictionary-backed sense inventory was available.")
         else:
-            st.dataframe(lsenses,hide_index=True,use_container_width=True,height=420)
+            st.dataframe(lsenses,hide_index=True,width="stretch",height=420)
 
     with tabs[9]:
-        st.plotly_chart(fiber_plot(state),use_container_width=True,config={"scrollZoom":True,"displaylogo":False})
+        st.plotly_chart(fiber_plot(state),width="stretch",config={"scrollZoom":True,"displaylogo":False})
         st.info("The vertical line is an identity-preserving fiber, not a reasoning path.")
 
     with tabs[10]:
         c1,c2 = st.columns(2)
         with c1:
             st.markdown("#### Relations")
-            st.dataframe(relation_df(state),hide_index=True,use_container_width=True)
+            st.dataframe(relation_df(state),hide_index=True,width="stretch")
         with c2:
             st.markdown("#### Hyperrelations")
-            st.dataframe(hyperrelation_df(state),hide_index=True,use_container_width=True)
+            st.dataframe(hyperrelation_df(state),hide_index=True,width="stretch")
         st.markdown("#### Transformations")
-        st.dataframe(pd.DataFrame([asdict(t) for t in state.transformations]),hide_index=True,use_container_width=True)
+        st.dataframe(pd.DataFrame([asdict(t) for t in state.transformations]),hide_index=True,width="stretch")
 
     with tabs[11]:
         c1,c2 = st.columns(2)
@@ -5840,41 +7763,28 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
     with tabs[12]:
         labels = [ts.token.surface for ts in state.tokens if ts.token.pos != "PUNCT"]
         plot_emb = embeddings[:len(labels)] if len(embeddings) >= len(labels) else embeddings
-        st.plotly_chart(embedding_plot(plot_emb,labels[:len(plot_emb)]),use_container_width=True)
+        st.plotly_chart(embedding_plot(plot_emb,labels[:len(plot_emb)]),width="stretch")
         st.caption(f"Embedding model: {embedding_model}")
         if latent is not None:
             st.metric("Latent dimensions",latent.shape[1])
             if losses:
                 fig=go.Figure(go.Scatter(x=np.arange(1,len(losses)+1),y=losses,mode="lines"))
                 fig.update_layout(template="plotly_dark",title="NNS reconstruction loss",height=350)
-                st.plotly_chart(fig,use_container_width=True)
+                st.plotly_chart(fig,width="stretch")
 
     with tabs[13]:
-        export = {
-            "top_layer":asdict(top),
-            "language_map":asdict(lmap),
-            "utterance_state":asdict(state),
-            "meaning_frames":[asdict(x) for x in state.meaningFrames],
-            "references":[asdict(x) for x in state.references],
-            "coreference":[asdict(x) for x in state.coreference],
-            "semantic_roles":[asdict(x) for x in state.semanticRoles],
-            "comprehension_certificate":asdict(state.comprehensionCertificate) if state.comprehensionCertificate else None,
-            "state_delta":asdict(state.stateDelta) if state.stateDelta else None,
-            "counterfactual_neighbors":[asdict(x) for x in state.counterfactualNeighbors],
-            "lexical_relations": lexical_edges_df(state).to_dict(orient="records"),
-            "lexical_senses": lexical_senses_df(state).to_dict(orient="records"),
-        }
+        export = atlas_state_artifact(state,lmap,embedding_model,top)
         payload=json.dumps(export,ensure_ascii=False,indent=2).encode("utf-8")
-        st.download_button("Download ATLAS JSON",payload,"atlas_state.json","application/json",use_container_width=True)
+        st.download_button("Download ATLAS JSON",payload,"atlas_state.json","application/json",width="stretch",key="single_export_json")
         st.download_button(
             "Download token states CSV",
             token_state_df(state).to_csv(index=False).encode("utf-8"),
-            "atlas_token_states.csv","text/csv",use_container_width=True
+            "atlas_token_states.csv","text/csv",width="stretch",key="single_export_tokens"
         )
         st.download_button(
             "Download lexical relations CSV",
             lexical_edges_df(state).to_csv(index=False).encode("utf-8"),
-            "atlas_lexical_relations.csv","text/csv",use_container_width=True
+            "atlas_lexical_relations.csv","text/csv",width="stretch",key="single_export_relations"
         )
         report_payload = atlas_report_markdown(
             [state],[lmap],
@@ -5884,7 +7794,7 @@ def render_single(state: UtteranceState, lmap: LanguageMapState, embeddings: np.
         st.download_button(
             "Download complete clean report",
             report_payload.encode("utf-8"),
-            "atlas_complete_report.md","text/markdown",use_container_width=True
+            "atlas_complete_report.md","text/markdown",width="stretch",key="single_export_report"
         )
 
 # =============================================================================
@@ -5902,7 +7812,7 @@ if mode == "Single word / utterance + each token":
         "I believe the model may understand the evidence, but I do not yet know whether its conclusion is true.",
         height=150,
     )
-    run = st.button("Construct full ATLAS state",type="primary",use_container_width=True)
+    run = st.button("Construct full ATLAS state",type="primary",width="stretch")
 
     if run:
         lang = LANGUAGES[lang_name]
@@ -5916,6 +7826,12 @@ if mode == "Single word / utterance + each token":
             latent,recon,losses=train_autoencoder(embeddings,latent_dim,hidden_dim,epochs,lr,seed)
 
         st.session_state["single_result"]=(state,lmap,embeddings,emb_model,latent,losses)
+        register_atlas_dataset_run(
+            mode,[state],[lmap],
+            {"embedding_model":emb_model,"offline":offline,"hash_dims":hash_dims,
+             "nns_enabled":use_nns,"latent_dim":latent_dim if use_nns else None},
+            {"context":context,"embedding_shape":list(embeddings.shape)},
+        )
 
     if "single_result" in st.session_state:
         render_single(*st.session_state["single_result"])
@@ -5933,7 +7849,7 @@ elif mode in {"Word ↔ Word","Utterance ↔ Utterance"}:
         lb_name=st.selectbox("Language B",list(LANGUAGES.keys()),index=0,key="pair_lb")
         b=st.text_area("Word B" if word_mode else "Utterance B","حكمة" if word_mode else "I hate you.",height=120)
 
-    if st.button("Compare A ↔ B",type="primary",use_container_width=True):
+    if st.button("Compare A ↔ B",type="primary",width="stretch"):
         la,lb=LANGUAGES[la_name],LANGUAGES[lb_name]
         sa,sb=make_utterance_state(a.strip(),la),make_utterance_state(b.strip(),lb)
         embs,emodel=embed([a,b],model_name,offline,hash_dims)
@@ -5942,6 +7858,12 @@ elif mode in {"Word ↔ Word","Utterance ↔ Utterance"}:
         align,inv,resid,resdf=align_many([sa,sb],embs,[f"A:{a}",f"B:{b}"])
         top=top_layer_for([sa,sb],[lm_a,lm_b],[align],[inv],resid)
         st.session_state["pair_result"]=(sa,sb,embs,emodel,comp,align,inv,resdf,top)
+        register_atlas_dataset_run(
+            mode,[sa,sb],[lm_a,lm_b],
+            {"embedding_model":emodel,"offline":offline,"hash_dims":hash_dims},
+            {"comparison":comp,"alignment":align,"invariant":inv,
+             "residual_count":len(resid)},
+        )
 
     if "pair_result" in st.session_state:
         sa,sb,embs,emodel,comp,align,inv,resdf,top=st.session_state["pair_result"]
@@ -5968,7 +7890,7 @@ elif mode in {"Word ↔ Word","Utterance ↔ Utterance"}:
             st.markdown(pair_report)
             st.download_button(
                 "Download pair report", pair_report.encode("utf-8"),
-                "atlas_pair_report.md","text/markdown",use_container_width=True
+                "atlas_pair_report.md","text/markdown",width="stretch"
             )
 
         with tabs[1]:
@@ -5985,16 +7907,16 @@ elif mode in {"Word ↔ Word","Utterance ↔ Utterance"}:
                     st.code(f.canonical_form)
 
         with tabs[2]:
-            st.plotly_chart(make_comparison_delta(comp),use_container_width=True)
+            st.plotly_chart(make_comparison_delta(comp),width="stretch")
             st.dataframe(pd.DataFrame([
                 {"space":s,"A":space_summary(sa.typed_spaces)[s],"B":space_summary(sb.typed_spaces)[s],
                  "delta":comp["space_delta"][s],"abs_delta":comp["space_abs_delta"][s],
                  "candidate_invariant":s in comp["candidate_invariant_spaces"]}
                 for s in SPACE_ORDER
-            ]),hide_index=True,use_container_width=True)
+            ]),hide_index=True,width="stretch")
 
         with tabs[3]:
-            st.plotly_chart(make_space_bar(sa,"A"),use_container_width=True)
+            st.plotly_chart(make_space_bar(sa,"A"),width="stretch")
             st.json({
                 "meaningFrames":[asdict(x) for x in sa.meaningFrames],
                 "reference":[asdict(x) for x in sa.references],
@@ -6003,7 +7925,7 @@ elif mode in {"Word ↔ Word","Utterance ↔ Utterance"}:
             })
 
         with tabs[4]:
-            st.plotly_chart(make_space_bar(sb,"B"),use_container_width=True)
+            st.plotly_chart(make_space_bar(sb,"B"),width="stretch")
             st.json({
                 "meaningFrames":[asdict(x) for x in sb.meaningFrames],
                 "reference":[asdict(x) for x in sb.references],
@@ -6013,10 +7935,10 @@ elif mode in {"Word ↔ Word","Utterance ↔ Utterance"}:
 
         with tabs[5]:
             st.json({"alignment":asdict(align),"invariant":asdict(inv)})
-            st.plotly_chart(embedding_plot(embs,["A","B"]),use_container_width=True)
+            st.plotly_chart(embedding_plot(embs,["A","B"]),width="stretch")
 
         with tabs[6]:
-            st.dataframe(resdf,hide_index=True,use_container_width=True)
+            st.dataframe(resdf,hide_index=True,width="stretch")
 
         with tabs[7]:
             st.json(asdict(top),expanded=False)
@@ -6037,7 +7959,7 @@ elif mode in {"Word → Many Languages","Utterance → Many Languages"}:
     entries=st.text_area("Multilingual realizations",default,height=220)
     gloss=st.text_input("Concept / comparison label","wisdom" if word_mode else "epistemic utterance")
 
-    if st.button("Triangulate across languages",type="primary",use_container_width=True):
+    if st.button("Triangulate across languages",type="primary",width="stretch"):
         declared_entries=[]
         observed=[]
         for line in entries.splitlines():
@@ -6078,6 +8000,13 @@ elif mode in {"Word → Many Languages","Utterance → Many Languages"}:
                 term_proposals=discovery.term_proposals,
             )
             st.session_state["many_result"]=(states,labels,embs,emodel,align,inv,resdf,top,discovery)
+            register_atlas_dataset_run(
+                mode,states,maps,
+                {"embedding_model":emodel,"offline":offline,"hash_dims":hash_dims,
+                 "concept_label":gloss},
+                {"labels":labels,"alignment":align,"invariant":inv,
+                 "discovery":discovery},
+            )
 
     if "many_result" in st.session_state:
         states,labels,embs,emodel,align,inv,resdf,top,discovery=st.session_state["many_result"]
@@ -6109,25 +8038,25 @@ elif mode in {"Word → Many Languages","Utterance → Many Languages"}:
                 "Download complete multilingual report",
                 report_md.encode("utf-8"),
                 "atlas_multilingual_report.md","text/markdown",
-                use_container_width=True
+                width="stretch"
             )
 
         with tabs[1]:
-            st.plotly_chart(make_many_heatmap(states,labels),use_container_width=True)
-            st.plotly_chart(embedding_plot(embs,labels),use_container_width=True)
+            st.plotly_chart(make_many_heatmap(states,labels),width="stretch")
+            st.plotly_chart(embedding_plot(embs,labels),width="stretch")
         with tabs[2]:
             member=st.selectbox("Inspect member",labels)
             idx=labels.index(member)
-            st.plotly_chart(make_space_bar(states[idx],member),use_container_width=True)
-            st.dataframe(token_state_df(states[idx]),hide_index=True,use_container_width=True)
+            st.plotly_chart(make_space_bar(states[idx],member),width="stretch")
+            st.dataframe(token_state_df(states[idx]),hide_index=True,width="stretch")
         with tabs[3]:
             lexical_member = st.selectbox("Inspect lexical member",labels,key="many_lex_member")
             li = labels.index(lexical_member)
-            st.plotly_chart(lexical_graph(states[li]),use_container_width=True)
-            st.dataframe(lexical_coverage_df(states[li]),hide_index=True,use_container_width=True)
+            st.plotly_chart(lexical_graph(states[li]),width="stretch")
+            st.dataframe(lexical_coverage_df(states[li]),hide_index=True,width="stretch")
             le = lexical_edges_df(states[li])
             if not le.empty:
-                st.dataframe(le,hide_index=True,use_container_width=True,height=520)
+                st.dataframe(le,hide_index=True,width="stretch",height=520)
 
         with tabs[4]:
             st.json({"alignment":asdict(align),"invariant":asdict(inv)})
@@ -6135,10 +8064,10 @@ elif mode in {"Word → Many Languages","Utterance → Many Languages"}:
                 {"space":sp,**vals}
                 for sp,vals in inv.shared_coordinates.items()
             ])
-            st.dataframe(inv_df,hide_index=True,use_container_width=True)
+            st.dataframe(inv_df,hide_index=True,width="stretch")
         with tabs[5]:
             st.dataframe(resdf.sort_values("residual",key=lambda s:s.abs(),ascending=False),
-                         hide_index=True,use_container_width=True,height=600)
+                         hide_index=True,width="stretch",height=600)
         with tabs[6]:
             st.markdown("### Candidate new coordinates")
             st.caption(
@@ -6150,7 +8079,7 @@ elif mode in {"Word → Many Languages","Utterance → Many Languages"}:
             if coord_df.empty:
                 st.info("No candidate new coordinate passed the current discovery gate.")
             else:
-                st.dataframe(coord_df,hide_index=True,use_container_width=True)
+                st.dataframe(coord_df,hide_index=True,width="stretch")
             with st.expander("Discovery diagnostics"):
                 st.json(discovery.diagnostics)
                 st.markdown("#### Excluded coordinates")
@@ -6162,7 +8091,7 @@ elif mode in {"Word → Many Languages","Utterance → Many Languages"}:
             if gap_df.empty:
                 st.info("No persistent gap candidate passed the current gate.")
             else:
-                st.dataframe(gap_df,hide_index=True,use_container_width=True)
+                st.dataframe(gap_df,hide_index=True,width="stretch")
 
         with tabs[8]:
             st.markdown("### Where a new term may be warranted")
@@ -6175,11 +8104,11 @@ elif mode in {"Word → Many Languages","Utterance → Many Languages"}:
             if term_df.empty:
                 st.info("No lexicalization gap currently warrants a term proposal.")
             else:
-                st.dataframe(term_df,hide_index=True,use_container_width=True)
+                st.dataframe(term_df,hide_index=True,width="stretch")
 
         with tabs[9]:
             sim=cosine_similarity(embs)
-            st.dataframe(pd.DataFrame(sim,index=labels,columns=labels),use_container_width=True)
+            st.dataframe(pd.DataFrame(sim,index=labels,columns=labels),width="stretch")
 
         with tabs[10]:
             st.json(asdict(top),expanded=False)
@@ -6221,7 +8150,7 @@ elif mode == "Coordinate / Gap Discovery":
     min_evr = c2.slider("Minimum unexplained axis variance",0.02,0.40,0.08,0.01)
     max_corr = c3.slider("Maximum correlation with known coordinates",0.20,0.95,0.70,0.05)
 
-    if st.button("Run structural discovery",type="primary",use_container_width=True):
+    if st.button("Run structural discovery",type="primary",width="stretch"):
         declared=[]
         observed=[]
 
@@ -6273,6 +8202,14 @@ elif mode == "Coordinate / Gap Discovery":
                 term_proposals=terms,
             )
             st.session_state["discovery_result"]=(states,labels,embs,emodel,align,inv,resdf,report,top)
+            register_atlas_dataset_run(
+                mode,states,maps,
+                {"embedding_model":emodel,"offline":offline,"hash_dims":hash_dims,
+                 "min_members":min_members,"min_evr":min_evr,"max_corr":max_corr,
+                 "concept_label":discovery_label},
+                {"labels":labels,"alignment":align,"invariant":inv,
+                 "discovery":report},
+            )
 
     if "discovery_result" in st.session_state:
         states,labels,embs,emodel,align,inv,resdf,report,top=st.session_state["discovery_result"]
@@ -6291,8 +8228,8 @@ elif mode == "Coordinate / Gap Discovery":
         ])
 
         with tabs[0]:
-            st.plotly_chart(make_many_heatmap(states,labels),use_container_width=True)
-            st.plotly_chart(embedding_plot(embs,labels),use_container_width=True)
+            st.plotly_chart(make_many_heatmap(states,labels),width="stretch")
+            st.plotly_chart(embedding_plot(embs,labels),width="stretch")
             st.json(report.diagnostics)
             st.markdown(
                 """
@@ -6311,14 +8248,14 @@ elif mode == "Coordinate / Gap Discovery":
             if df.empty:
                 st.info("No candidate coordinate passed the discovery gate.")
             else:
-                st.dataframe(df,hide_index=True,use_container_width=True,height=520)
+                st.dataframe(df,hide_index=True,width="stretch",height=520)
 
         with tabs[2]:
             df=discovery_gap_df(report)
             if df.empty:
                 st.info("No persistent gap candidate passed the gate.")
             else:
-                st.dataframe(df,hide_index=True,use_container_width=True,height=520)
+                st.dataframe(df,hide_index=True,width="stretch",height=520)
 
         with tabs[3]:
             df=term_proposal_df(report)
@@ -6328,7 +8265,7 @@ elif mode == "Coordinate / Gap Discovery":
                     "`Language Name | ?` to test an explicit lexical gap."
                 )
             else:
-                st.dataframe(df,hide_index=True,use_container_width=True)
+                st.dataframe(df,hide_index=True,width="stretch")
             st.warning(
                 "ATLAS proposes a placeholder coordinate/term requirement here, "
                 "not a fabricated word. Actual lexical engineering must occur in the "
@@ -6350,7 +8287,7 @@ elif mode == "Coordinate / Gap Discovery":
                         key=lambda s:s.abs(),
                         ascending=False
                     ),
-                    hide_index=True,use_container_width=True,height=620
+                    hide_index=True,width="stretch",height=620
                 )
 
         with tabs[6]:
@@ -6410,7 +8347,7 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
     min_discovery_evr = c3.slider("Discovery min EVR",0.02,0.35,0.07,0.01)
     discovery_max_corr = c4.slider("Discovery max known corr",0.20,0.95,0.70,0.05)
 
-    if st.button("Run ATLAS Intelligence Benchmark",type="primary",use_container_width=True):
+    if st.button("Run ATLAS Intelligence Benchmark",type="primary",width="stretch"):
         parsed = parse_language_benchmark_input(raw_benchmark)
 
         if not parsed:
@@ -6476,6 +8413,19 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
                 grouped_states, language_codes, all_states, all_labels,
                 embeddings, emodel, report
             )
+            benchmark_maps=[
+                language_map_profile(code,name)
+                for name,code in language_codes.items()
+            ]
+            register_atlas_dataset_run(
+                mode,all_states,benchmark_maps,
+                {"embedding_model":emodel,"offline":offline,"hash_dims":hash_dims,
+                 "run_discovery":run_discovery,
+                 "min_discovery_members":min_discovery_members,
+                 "min_discovery_evr":min_discovery_evr,
+                 "discovery_max_corr":discovery_max_corr},
+                {"labels":all_labels,"intelligence_report":report},
+            )
 
     if "intel_benchmark_result" in st.session_state:
         grouped_states, language_codes, all_states, all_labels, embeddings, emodel, report = st.session_state["intel_benchmark_result"]
@@ -6514,13 +8464,13 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
                 md.encode("utf-8"),
                 "atlas_intelligence_report.md",
                 "text/markdown",
-                use_container_width=True
+                width="stretch"
             )
 
         with tabs[1]:
             st.markdown("### Benchmark dimensions")
             dim_df = benchmark_dimension_df(report)
-            st.dataframe(dim_df,hide_index=True,use_container_width=True)
+            st.dataframe(dim_df,hide_index=True,width="stretch")
             if not dim_df.empty:
                 fig = go.Figure(go.Bar(
                     x=dim_df["dimension"],y=dim_df["score"]
@@ -6531,18 +8481,18 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
                     height=430,
                     title="ATLAS intelligence benchmark dimensions"
                 )
-                st.plotly_chart(fig,use_container_width=True)
+                st.plotly_chart(fig,width="stretch")
 
             st.markdown("### Global typed-space coverage / activation")
             cov_df = pd.DataFrame([
                 {"space":sp,"coverage_activation":v}
                 for sp,v in report.typed_space_coverage.items()
             ]).sort_values("coverage_activation",ascending=False)
-            st.dataframe(cov_df,hide_index=True,use_container_width=True,height=520)
+            st.dataframe(cov_df,hide_index=True,width="stretch",height=520)
 
         with tabs[2]:
             pdf = intelligence_profile_df(report)
-            st.dataframe(pdf,hide_index=True,use_container_width=True,height=520)
+            st.dataframe(pdf,hide_index=True,width="stretch",height=520)
 
             metric_choice = st.selectbox(
                 "Compare language profiles by",
@@ -6562,7 +8512,7 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
                     height=420,
                     title=f"Language profile — {metric_choice}"
                 )
-                st.plotly_chart(fig,use_container_width=True)
+                st.plotly_chart(fig,width="stretch")
 
         with tabs[3]:
             map_language=st.selectbox(
@@ -6572,7 +8522,7 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
             )
             map_code=language_codes[map_language]
             bm=language_map_profile(map_code,map_language)
-            st.plotly_chart(native_language_map_graph(bm),use_container_width=True)
+            st.plotly_chart(native_language_map_graph(bm),width="stretch")
             st.json({
                 "analyzerStatus":bm.analyzerStatus,
                 "nativeMechanics":bm.nativeMechanics,
@@ -6634,7 +8584,7 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
             if fdf.empty:
                 st.info("No meaning frames were constructed.")
             else:
-                st.dataframe(fdf,hide_index=True,use_container_width=True,height=620)
+                st.dataframe(fdf,hide_index=True,width="stretch",height=620)
 
         with tabs[6]:
             lexical_rows = []
@@ -6649,7 +8599,7 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
             if lexical_rows:
                 st.dataframe(
                     pd.concat(lexical_rows,ignore_index=True),
-                    hide_index=True,use_container_width=True,height=620
+                    hide_index=True,width="stretch",height=620
                 )
             else:
                 st.info("No lexical coverage rows.")
@@ -6667,7 +8617,7 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
                 )
                 st.dataframe(
                     fdf[fdf["severity"].isin(severity_filter)],
-                    hide_index=True,use_container_width=True,height=650
+                    hide_index=True,width="stretch",height=650
                 )
 
         with tabs[8]:
@@ -6678,7 +8628,7 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
             if len(all_states) >= 2:
                 st.plotly_chart(
                     embedding_plot(embeddings,all_labels),
-                    use_container_width=True
+                    width="stretch"
                 )
 
         with tabs[9]:
@@ -6688,12 +8638,12 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
                 st.markdown("#### Candidate coordinates")
                 st.dataframe(
                     discovery_coordinate_df(report.discovery),
-                    hide_index=True,use_container_width=True
+                    hide_index=True,width="stretch"
                 )
                 st.markdown("#### Persistent gaps")
                 st.dataframe(
                     discovery_gap_df(report.discovery),
-                    hide_index=True,use_container_width=True
+                    hide_index=True,width="stretch"
                 )
                 with st.expander("Discovery diagnostics"):
                     st.json(report.discovery.diagnostics)
@@ -6715,28 +8665,28 @@ Kanıtların bu sonucu destekleyebileceğine inanıyorum.
                 md.encode("utf-8"),
                 "atlas_intelligence_report.md",
                 "text/markdown",
-                use_container_width=True
+                width="stretch"
             )
             st.download_button(
                 "Download intelligence report JSON",
                 json.dumps(machine,ensure_ascii=False,indent=2).encode("utf-8"),
                 "atlas_intelligence_report.json",
                 "application/json",
-                use_container_width=True
+                width="stretch"
             )
             st.download_button(
                 "Download language profiles CSV",
                 intelligence_profile_df(report).to_csv(index=False).encode("utf-8"),
                 "atlas_language_profiles.csv",
                 "text/csv",
-                use_container_width=True
+                width="stretch"
             )
             st.download_button(
                 "Download failure ledger CSV",
                 intelligence_findings_df(report).to_csv(index=False).encode("utf-8"),
                 "atlas_failure_ledger.csv",
                 "text/csv",
-                use_container_width=True
+                width="stretch"
             )
 
 
@@ -6754,29 +8704,39 @@ elif mode == "Active Native Language Maps":
     m[3].metric("Native axes",sum(len(v) for v in lmap.typed_spaces.values()))
     m[4].metric("Operators",len(lmap.nativeOperators))
 
+    if st.button(
+        "Generate native language-map training data",type="primary",width="stretch",
+        key="generate_native_map_training"
+    ):
+        register_atlas_dataset_run(
+            mode,[],[lmap],{"probe":False,"language_map":lang_name},
+            {"generation_target":"language_map_state+operators+constraints"},
+        )
+        st.success("Language-map state, native operators, constraints, coordinates, and metadata were added to the training ledger.")
+
     tabs=st.tabs([
         "Map Geometry","Native Spaces","Mechanics","Operators","Constraints",
         "Alignment Interfaces","Analyzer Probe","Raw State"
     ])
 
     with tabs[0]:
-        st.plotly_chart(native_language_map_graph(lmap),use_container_width=True)
+        st.plotly_chart(native_language_map_graph(lmap),width="stretch")
 
     with tabs[1]:
         rows=[]
         for sp,coords in lmap.typed_spaces.items():
             for c,v in coords.items():
                 rows.append({"space":sp,"coordinate":c,"value":v,"description":SPACE_DESCRIPTIONS.get(sp,"")})
-        st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True,height=650)
+        st.dataframe(pd.DataFrame(rows),hide_index=True,width="stretch",height=650)
 
     with tabs[2]:
         st.json(lmap.nativeMechanics)
 
     with tabs[3]:
-        st.dataframe(pd.DataFrame(lmap.nativeOperators),hide_index=True,use_container_width=True)
+        st.dataframe(pd.DataFrame(lmap.nativeOperators),hide_index=True,width="stretch")
 
     with tabs[4]:
-        st.dataframe(pd.DataFrame(lmap.nativeConstraints),hide_index=True,use_container_width=True)
+        st.dataframe(pd.DataFrame(lmap.nativeConstraints),hide_index=True,width="stretch")
 
     with tabs[5]:
         st.json({
@@ -6787,13 +8747,13 @@ elif mode == "Active Native Language Maps":
 
     with tabs[6]:
         probe=st.text_area("Probe utterance","I love myself." if lang=="en" else "",height=110,key="native_probe_text")
-        if st.button("Run through this native map",use_container_width=True,key="native_probe_run"):
+        if st.button("Run through this native map",width="stretch",key="native_probe_run"):
             if probe.strip():
                 s=make_utterance_state(probe.strip(),lang)
                 st.markdown("#### Native mechanics observed")
                 st.json(s.nativeMechanicsObserved)
                 st.markdown("#### Tokens")
-                st.dataframe(pd.DataFrame([asdict(ts.token) for ts in s.tokens]),hide_index=True,use_container_width=True)
+                st.dataframe(pd.DataFrame([asdict(ts.token) for ts in s.tokens]),hide_index=True,width="stretch")
                 st.markdown("#### Meaning frames")
                 st.json([asdict(f) for f in s.meaningFrames])
                 st.markdown("#### Roles / reference")
@@ -6802,6 +8762,11 @@ elif mode == "Active Native Language Maps":
                     "coreference":[asdict(c) for c in s.coreference],
                     "roles":[asdict(r) for r in s.semanticRoles],
                 })
+                register_atlas_dataset_run(
+                    mode,[s],[lmap],
+                    {"probe":True,"language_map":lang_name},
+                    {"native_mechanics_observed":s.nativeMechanicsObserved},
+                )
 
     with tabs[7]:
         st.json(asdict(lmap),expanded=False)
@@ -6819,11 +8784,17 @@ elif mode == "Language Map ↔ Language Map":
     with c2:
         lb_name=st.selectbox("Language map B",list(LANGUAGES.keys()),index=1,key="lm_b")
 
-    if st.button("Compare active language maps",type="primary",use_container_width=True):
+    if st.button("Compare active language maps",type="primary",width="stretch"):
         la,lb=LANGUAGES[la_name],LANGUAGES[lb_name]
         lma,lmb=language_map_profile(la,la_name),language_map_profile(lb,lb_name)
         summary_df,coord_df=compare_language_maps_native(lma,lmb)
         st.session_state["lm_result"]=(lma,lmb,summary_df,coord_df)
+        register_atlas_dataset_run(
+            mode,[],[lma,lmb],
+            {"language_a":la_name,"language_b":lb_name},
+            {"shared_native_geometry":summary_df,
+             "coordinate_alignment":coord_df},
+        )
 
     if "lm_result" in st.session_state:
         lma,lmb,summary_df,coord_df=st.session_state["lm_result"]
@@ -6849,29 +8820,29 @@ elif mode == "Language Map ↔ Language Map":
                 fig=go.Figure(go.Bar(x=plot_df["space"],y=plot_df["native_axis_coherence"]))
                 fig.update_layout(template="plotly_dark",height=430,yaxis=dict(range=[0,1]),
                                   title="Coherence over shared native axes only")
-                st.plotly_chart(fig,use_container_width=True)
-            st.dataframe(summary_df,hide_index=True,use_container_width=True,height=520)
+                st.plotly_chart(fig,width="stretch")
+            st.dataframe(summary_df,hide_index=True,width="stretch",height=520)
 
         with tabs[1]:
             if coord_df.empty:
                 st.info("No coordinate-level native alignment available.")
             else:
-                st.dataframe(coord_df,hide_index=True,use_container_width=True,height=620)
+                st.dataframe(coord_df,hide_index=True,width="stretch",height=620)
 
         with tabs[2]:
-            st.plotly_chart(native_language_map_graph(lma),use_container_width=True)
+            st.plotly_chart(native_language_map_graph(lma),width="stretch")
             st.json(asdict(lma),expanded=False)
 
         with tabs[3]:
-            st.plotly_chart(native_language_map_graph(lmb),use_container_width=True)
+            st.plotly_chart(native_language_map_graph(lmb),width="stretch")
             st.json(asdict(lmb),expanded=False)
 
         with tabs[4]:
             ca,cb=st.columns(2)
             with ca:
-                st.plotly_chart(native_language_map_graph(lma),use_container_width=True,key="map_graph_a")
+                st.plotly_chart(native_language_map_graph(lma),width="stretch",key="map_graph_a")
             with cb:
-                st.plotly_chart(native_language_map_graph(lmb),use_container_width=True,key="map_graph_b")
+                st.plotly_chart(native_language_map_graph(lmb),width="stretch",key="map_graph_b")
 
         with tabs[5]:
             st.json({
@@ -6894,9 +8865,582 @@ elif mode == "Language Map ↔ Language Map":
             })
 
 
+elif mode == "Data / Metadata Observatory":
+    st.subheader("ATLAS Data / Metadata Observatory")
+    st.write(
+        "Every experiment is a dataset-producing event. This observatory preserves the "
+        "full state snapshots while also normalizing them into queryable objects, "
+        "coordinate facts, edges, metadata lineage, quality measures, drift keys, and "
+        "gated training candidates."
+    )
+    st.caption(
+        "Carrier → native analyzer → typed state → relations/hyperrelations → evidence class "
+        "→ aggregation → validation gate → display/export/training material"
+    )
+
+    session_ledger=st.session_state.setdefault("atlas_dataset_ledger",[])
+    store=active_atlas_store()
+
+    st.markdown("### Construct a downloadable ATLAS state")
+    st.caption(
+        "Enter language data, construct its typed state, then download the complete state. "
+        "No source upload or prior bundle is required."
+    )
+    oc1,oc2=st.columns([1,3])
+    with oc1:
+        observatory_lang_name=st.selectbox(
+            "Language",list(LANGUAGES.keys()),key="observatory_construct_language"
+        )
+    with oc2:
+        observatory_text=st.text_area(
+            "Word, utterance, or observation",
+            "Although I believe the evidence may support this conclusion, I do not yet know whether it is true, because the result could change if new information appears.",
+            height=120,key="observatory_construct_text"
+        )
+    if st.button(
+        "Construct downloadable ATLAS state",type="primary",width="stretch",
+        key="observatory_construct_state"
+    ):
+        clean_text=observatory_text.strip()
+        if not clean_text:
+            st.warning("Enter a word, utterance, or observation to construct its state.")
+        else:
+            obs_lang=LANGUAGES[observatory_lang_name]
+            obs_state=make_utterance_state(clean_text,obs_lang)
+            obs_map=language_map_profile(obs_lang,observatory_lang_name)
+            st.session_state["observatory_state_result"]=(obs_state,obs_map)
+            register_atlas_dataset_run(
+                mode,[obs_state],[obs_map],
+                {"construction_surface":"observatory","embedding_model":"not required"},
+                {"downloadable_state":True,"source_upload_required":False},
+            )
+    if "observatory_state_result" in st.session_state:
+        obs_state,obs_map=st.session_state["observatory_state_result"]
+        render_state_download_panel(obs_state,obs_map,"not required","observatory_primary")
+
+    persistent_ledger=store.load_runs(300) if store is not None else []
+    combined={
+        r.get("manifest",{}).get("run_id"):r
+        for r in persistent_ledger+session_ledger
+        if r.get("manifest",{}).get("run_id")
+    }
+    ledger=list(combined.values())
+
+    with st.expander("Optional: register dictionary, thesaurus, corpus or ontology source"):
+        if store is None:
+            st.info("Enable persistent data in the sidebar to register source artifacts.")
+        else:
+            source_file=st.file_uploader(
+                "Source file",type=["csv","tsv","json","jsonl","txt"],
+                key="atlas_source_file"
+            )
+            sc1,sc2,sc3=st.columns(3)
+            source_type=sc1.selectbox(
+                "Source type",
+                ["dictionary","thesaurus","corpus","ontology","lexical_graph","benchmark","observation_log"]
+            )
+            source_language=sc2.selectbox("Source language",list(LANGUAGES.keys()),key="source_language")
+            source_license=sc3.text_input("License / usage status","UNKNOWN",key="source_license")
+            source_title=st.text_input("Source title","",key="source_title")
+            sc4,sc5=st.columns(2)
+            source_uri=sc4.text_input("Canonical source URI","",key="source_uri")
+            source_version=sc5.text_input("Source version / date","",key="source_version")
+            if source_file is not None and st.button("Parse and register source",key="register_atlas_source"):
+                try:
+                    raw_source=source_file.getvalue()
+                    records=parse_source_records(
+                        source_file.name,raw_source,source_type,LANGUAGES[source_language]
+                    )
+                    artifact=build_source_artifact(
+                        source_file.name,raw_source,source_type,source_title,
+                        LANGUAGES[source_language],source_uri,source_license,
+                        source_version,f"ATLAS_{Path(source_file.name).suffix[1:].upper()}_PARSER",records
+                    )
+                    if store.register_source(artifact,raw_source,records):
+                        st.success(f"Registered {artifact.title} with {len(records)} content-addressed records.")
+                    else:
+                        st.info("This exact content-addressed source is already registered.")
+                except Exception as exc:
+                    st.error(f"Source registration failed: {exc}")
+
+    sources_df=store.list_sources() if store is not None else pd.DataFrame()
+    if not sources_df.empty:
+        st.markdown("#### Persistent source catalog")
+        st.dataframe(sources_df,hide_index=True,width="stretch",height=260)
+
+    with st.expander("Optional: import a prior ATLAS data bundle",expanded=False):
+        uploaded=st.file_uploader("ATLAS dataset bundle JSON",type=["json"],key="atlas_bundle_import")
+        if uploaded is not None and st.button("Merge imported bundle",key="merge_atlas_bundle"):
+            try:
+                payload=json.loads(uploaded.getvalue().decode("utf-8"))
+                added,skipped=merge_atlas_dataset_bundle(payload)
+                st.success(f"Merged {added} runs; skipped {skipped} duplicate run IDs.")
+                session_ledger=st.session_state["atlas_dataset_ledger"]
+                persistent_ledger=store.load_runs(300) if store is not None else []
+                combined={r.get("manifest",{}).get("run_id"):r for r in persistent_ledger+session_ledger}
+                ledger=[r for k,r in combined.items() if k]
+            except Exception as exc:
+                st.error(f"Bundle import failed: {exc}")
+
+    if not ledger:
+        st.info(
+            "No dataset runs are present yet. Construct a state above or run any other "
+            "experiment mode; generated data and metadata will be registered automatically."
+        )
+    else:
+        tables=atlas_dataset_tables(ledger)
+        summary=atlas_dataset_summary(ledger,tables)
+        objects=tables["objects"]
+        coords=tables["coordinate_facts"]
+        edges=tables["edge_facts"]
+        metadata_df=tables["metadata_facts"]
+        examples=tables["training_examples"]
+        manifests=tables["manifests"]
+
+        m=st.columns(8)
+        m[0].metric("Runs",summary["runs"])
+        m[1].metric("Languages",summary["languages"])
+        m[2].metric("Objects",summary["objects"])
+        m[3].metric("Coordinate facts",summary["coordinate_facts"])
+        m[4].metric("Edge facts",summary["edge_facts"])
+        m[5].metric("Metadata facts",summary["metadata_facts"])
+        m[6].metric("Training eligible",summary["training_default_eligible"])
+        m[7].metric("Duplicate runs",summary["duplicate_runs"])
+        tm=st.columns(3)
+        tm[0].metric("Training candidates",summary["training_candidates"])
+        tm[1].metric("Supervision task types",summary["training_task_types"])
+        tm[2].metric("Hard negatives / failures",summary["training_hard_negatives"])
+
+        tabs=st.tabs([
+            "Observatory","Object Inventory","Coordinate Warehouse",
+            "Relations / Hyperrelations","Metadata + Lineage","Run Drift",
+            "Training Material","Manifests","Export / Import",
+            "Source Catalog","Data Products","View Builder"
+        ])
+
+        with tabs[0]:
+            c1,c2=st.columns([1.35,1])
+            with c1:
+                coverage=atlas_coverage_matrix(coords)
+                if coverage.empty:
+                    st.info("No coordinate coverage matrix available.")
+                else:
+                    fig=go.Figure(go.Heatmap(
+                        z=coverage.values,x=coverage.columns,y=coverage.index,
+                        zmin=0,zmax=1,colorscale="Viridis",
+                        colorbar=dict(title="Known rate")
+                    ))
+                    fig.update_layout(
+                        template="plotly_dark",height=470,
+                        title="Known coordinate rate by language and typed space",
+                        xaxis_title="Typed space",yaxis_title="Language"
+                    )
+                    st.plotly_chart(fig,width="stretch")
+            with c2:
+                if not coords.empty:
+                    ev=coords["evidence_class"].value_counts().reset_index()
+                    ev.columns=["evidence_class","facts"]
+                    st.markdown("#### Evidence inventory")
+                    st.dataframe(ev,hide_index=True,width="stretch")
+                if not objects.empty:
+                    oi=objects.groupby(["object_type","status"]).size().reset_index(name="count")
+                    st.markdown("#### Object/status inventory")
+                    st.dataframe(oi,hide_index=True,width="stretch")
+
+            st.markdown("#### What the aggregate now makes possible")
+            possibilities=pd.DataFrame([
+                {"operation":"Longitudinal drift","uses":"stable carrier fingerprints + run manifests","output":"coordinate/frame/relation changes across versions"},
+                {"operation":"Training-corpus generation","uses":"typed targets + provenance + confidence gates","output":"JSONL tasks with eligible/excluded examples"},
+                {"operation":"Ontology discovery","uses":"persistent residuals + missingness + weakly explained axes","output":"candidate coordinates, spaces, relations and terms"},
+                {"operation":"Analyzer evaluation","uses":"language/map/space coverage and failure metadata","output":"which analyzer fails where and under what context"},
+                {"operation":"Geometry validation","uses":"independent observations + status transitions","output":"which apparent manifolds survive new evidence"},
+                {"operation":"Active data acquisition","uses":"uncertainty, gaps and coverage deficits","output":"the next utterance/language/resource with highest information gain"},
+                {"operation":"Model supervision","uses":"frames, roles, transformations and counterfactual pairs","output":"multi-task targets beyond next-token prediction"},
+                {"operation":"Reproducibility","uses":"snapshots, configuration and lineage","output":"reconstructable experiment bundles"},
+            ])
+            st.dataframe(possibilities,hide_index=True,width="stretch",height=330)
+
+        with tabs[1]:
+            f1,f2=st.columns(2)
+            object_types=sorted(objects["object_type"].unique()) if not objects.empty else []
+            languages=sorted(objects["language"].unique()) if not objects.empty else []
+            selected_types=f1.multiselect("Object types",object_types,default=object_types,key="obs_object_types")
+            selected_languages=f2.multiselect("Languages",languages,default=languages,key="obs_object_langs")
+            view=objects[
+                objects["object_type"].isin(selected_types) & objects["language"].isin(selected_languages)
+            ] if not objects.empty else objects
+            st.dataframe(view,hide_index=True,width="stretch",height=650)
+
+        with tabs[2]:
+            c1,c2,c3=st.columns(3)
+            space_options=sorted(coords["space"].unique()) if not coords.empty else []
+            lang_options=sorted(coords["language"].unique()) if not coords.empty else []
+            evidence_options=sorted(coords["evidence_class"].unique()) if not coords.empty else []
+            selected_spaces=c1.multiselect("Spaces",space_options,default=space_options,key="warehouse_spaces")
+            selected_langs=c2.multiselect("Languages",lang_options,default=lang_options,key="warehouse_langs")
+            selected_evidence=c3.multiselect("Evidence classes",evidence_options,default=evidence_options,key="warehouse_evidence")
+            cview=coords[
+                coords["space"].isin(selected_spaces)
+                & coords["language"].isin(selected_langs)
+                & coords["evidence_class"].isin(selected_evidence)
+            ] if not coords.empty else coords
+            st.dataframe(cview,hide_index=True,width="stretch",height=650)
+            if not cview.empty:
+                stats=cview.groupby(["space","coordinate","evidence_class"]).agg(
+                    observations=("value","size"),mean=("value","mean"),
+                    std=("value","std"),minimum=("value","min"),maximum=("value","max"),
+                    languages=("language","nunique")
+                ).reset_index().sort_values("observations",ascending=False)
+                st.markdown("#### Coordinate aggregate statistics")
+                st.dataframe(stats,hide_index=True,width="stretch",height=520)
+
+        with tabs[3]:
+            c1,c2=st.columns([1,1])
+            with c1:
+                edge_counts=edges.groupby(["edge_type","relation","space","status"]).size().reset_index(name="count") if not edges.empty else pd.DataFrame()
+                st.markdown("#### Edge vocabulary")
+                st.dataframe(edge_counts.sort_values("count",ascending=False) if not edge_counts.empty else edge_counts,
+                             hide_index=True,width="stretch",height=560)
+            with c2:
+                if not edges.empty:
+                    top_edges=edges["relation"].value_counts().head(25).sort_values()
+                    fig=go.Figure(go.Bar(x=top_edges.values,y=top_edges.index,orientation="h"))
+                    fig.update_layout(template="plotly_dark",height=560,title="Most generated relation types")
+                    st.plotly_chart(fig,width="stretch")
+            st.markdown("#### Edge fact warehouse")
+            st.dataframe(edges,hide_index=True,width="stretch",height=620)
+
+        with tabs[4]:
+            st.plotly_chart(make_data_lineage_sankey(objects,coords),width="stretch")
+            if not metadata_df.empty:
+                meta_counts=metadata_df.groupby(["object_type","category","key"]).size().reset_index(name="facts")
+                c1,c2=st.columns([1,1.5])
+                with c1:
+                    st.markdown("#### Metadata schema inventory")
+                    st.dataframe(meta_counts.sort_values("facts",ascending=False),hide_index=True,width="stretch",height=600)
+                with c2:
+                    st.markdown("#### Metadata fact warehouse")
+                    display_meta=metadata_df.copy()
+                    display_meta["value"]=display_meta["value"].astype(str)
+                    st.dataframe(display_meta,hide_index=True,width="stretch",height=600)
+
+        with tabs[5]:
+            drift=atlas_drift_table(coords,manifests)
+            if drift.empty:
+                st.info(
+                    "Drift requires at least two captured runs containing the same stable carrier "
+                    "and coordinate. Repeat an experiment after changing the code, model, context, or input."
+                )
+            else:
+                threshold=st.slider("Minimum absolute drift",0.0,1.0,0.05,0.01,key="drift_threshold")
+                dview=drift[drift["abs_delta"]>=threshold]
+                m1,m2,m3=st.columns(3)
+                m1.metric("Comparable transitions",len(drift))
+                m2.metric("Above threshold",len(dview))
+                m3.metric("Maximum drift",f"{drift['abs_delta'].max():.3f}")
+                st.dataframe(dview,hide_index=True,width="stretch",height=650)
+
+        with tabs[6]:
+            st.warning(
+                "Generated examples are candidates, not automatically accepted training truth. "
+                "Eligibility preserves evidence class, confidence, provenance, and group fingerprints."
+            )
+            if examples.empty:
+                st.info("No training candidates have been generated.")
+            else:
+                c1,c2,c3=st.columns(3)
+                task_options=sorted(examples["task_type"].unique())
+                selected_tasks=c1.multiselect("Task types",task_options,default=task_options,key="training_tasks")
+                min_conf=c2.slider("Minimum confidence",0.0,1.0,0.60,0.05,key="training_confidence")
+                default_only=c3.toggle("Default-eligible only",True,key="training_default_only")
+                tview=examples[
+                    examples["task_type"].isin(selected_tasks)
+                    & (examples["confidence"]>=min_conf)
+                ].copy()
+                if default_only:
+                    tview=tview[tview["eligible_by_default"].astype(bool)]
+                def split_for(fp):
+                    bucket=int(hashlib.sha256(str(fp).encode()).hexdigest()[:8],16)%100
+                    return "train" if bucket<80 else ("validation" if bucket<90 else "test")
+                tview["split"]=tview["group_fingerprint"].map(split_for)
+                mm=st.columns(4)
+                mm[0].metric("Selected examples",len(tview))
+                mm[1].metric("Train",int((tview["split"]=="train").sum()))
+                mm[2].metric("Validation",int((tview["split"]=="validation").sum()))
+                mm[3].metric("Test",int((tview["split"]=="test").sum()))
+                task_counts=tview.groupby(["task_type","split"]).size().reset_index(name="count")
+                st.dataframe(task_counts,hide_index=True,width="stretch")
+                if "hierarchy_level" in tview:
+                    hierarchy_counts=tview.groupby(
+                        ["hierarchy_level","supervision_kind","eligible_by_default"]
+                    ).size().reset_index(name="examples")
+                    st.markdown("#### Carrier hierarchy and supervision inventory")
+                    st.dataframe(hierarchy_counts,hide_index=True,width="stretch")
+                training_display=tview.copy()
+                for column in ("input","target","evidence"):
+                    if column in training_display:
+                        training_display[column]=training_display[column].map(
+                            lambda value: json.dumps(json_safe(value),ensure_ascii=False,sort_keys=True)
+                            if isinstance(value,(dict,list,tuple)) else str(value)
+                        )
+                st.dataframe(training_display,hide_index=True,width="stretch",height=620)
+                jsonl="\n".join(
+                    json.dumps(json_safe(row),ensure_ascii=False)
+                    for row in tview.to_dict(orient="records")
+                )
+                st.download_button(
+                    "Download filtered training JSONL",jsonl.encode("utf-8"),
+                    "atlas_filtered_training_material.jsonl","application/x-ndjson",
+                    width="stretch"
+                )
+
+        with tabs[7]:
+            rows=[]
+            for run in ledger:
+                manifest=run.get("manifest",{})
+                rows.append({
+                    "run_id":manifest.get("run_id"),"created_at":manifest.get("created_at"),
+                    "experiment_mode":manifest.get("experiment_mode"),
+                    "content_fingerprint":manifest.get("content_fingerprint"),
+                    "schema_version":manifest.get("schema_version"),
+                    **{f"count::{k}":v for k,v in manifest.get("counts",{}).items()},
+                    **{f"quality::{k}":v for k,v in manifest.get("quality",{}).items()},
+                })
+            st.dataframe(pd.DataFrame(rows),hide_index=True,width="stretch",height=620)
+            selected_run=st.selectbox(
+                "Inspect complete run manifest",
+                [r.get("manifest",{}).get("run_id","") for r in ledger],
+                key="manifest_inspector"
+            )
+            selected=next(r for r in ledger if r.get("manifest",{}).get("run_id")==selected_run)
+            st.json(selected.get("manifest",{}),expanded=False)
+
+        with tabs[8]:
+            bundle=atlas_dataset_bundle(ledger)
+            c1,c2=st.columns(2)
+            with c1:
+                st.markdown("#### Complete reproducible bundle")
+                st.download_button(
+                    "Download ATLAS dataset bundle JSON",
+                    json.dumps(bundle,ensure_ascii=False,indent=2).encode("utf-8"),
+                    "atlas_data_metadata_bundle.json","application/json",
+                    width="stretch"
+                )
+            with c2:
+                st.markdown("#### Analysis-ready archive")
+                st.download_button(
+                    "Download ATLAS tables + training ZIP",
+                    atlas_dataset_zip(ledger),
+                    "atlas_data_metadata_tables.zip","application/zip",
+                    width="stretch"
+                )
+            st.markdown("#### Export contents")
+            st.dataframe(pd.DataFrame([
+                {"artifact":"bundle JSON","purpose":"complete manifests, normalized facts and full state snapshots"},
+                {"artifact":"objects.csv","purpose":"language maps, utterances, explicit word carriers, tokens and meaning frames"},
+                {"artifact":"coordinate_facts.csv","purpose":"long-form typed coordinate warehouse with evidence classes"},
+                {"artifact":"edge_facts.csv","purpose":"relations, hyperrelations, roles and coreference"},
+                {"artifact":"metadata_facts.csv","purpose":"provenance, validation, uncertainty, attention and native mechanics"},
+                {"artifact":"training candidates JSONL","purpose":"all generated supervision candidates with gates"},
+                {"artifact":"default-eligible JSONL","purpose":"conservative subset passing current evidence thresholds"},
+                {"artifact":"rejected-or-review JSONL","purpose":"failures, unresolved states, candidates and hard negatives retained for adjudication"},
+                {"artifact":"train/validation/test JSONL","purpose":"deterministic carrier-group-safe dataset splits"},
+                {"artifact":"by_task/*.jsonl","purpose":"one shard for every generated supervision task"},
+                {"artifact":"DATASET_CARD.json","purpose":"schema, task inventory, hierarchy levels, gates and epistemic policy"},
+            ]),hide_index=True,width="stretch")
+
+        with tabs[9]:
+            st.markdown("### Source and schema catalog")
+            if store is None:
+                st.info("Persistent storage is disabled; source and schema cataloging is unavailable.")
+            else:
+                catalog=store.catalog_summary()
+                cm=st.columns(5)
+                cm[0].metric("Stored runs",catalog["runs"])
+                cm[1].metric("Source artifacts",catalog["source_artifacts"])
+                cm[2].metric("Source records",catalog["source_records"])
+                cm[3].metric("Data products",catalog["data_products"])
+                cm[4].metric("Lineage edges",catalog["lineage_edges"])
+                if sources_df.empty:
+                    st.info("No external resources are registered yet.")
+                else:
+                    st.dataframe(sources_df,hide_index=True,width="stretch",height=520)
+                    st.caption(
+                        "Content identity, license, parser, version and authority status are stored "
+                        "before any source record can contribute semantic evidence."
+                    )
+                schema_rows=[]
+                for name,df in tables.items():
+                    for column in df.columns:
+                        hashable_values=df[column].dropna().map(
+                            lambda value: json.dumps(json_safe(value),ensure_ascii=False,sort_keys=True,default=str)
+                            if isinstance(value,(dict,list,tuple,set)) else str(value)
+                        )
+                        schema_rows.append({
+                            "table":name,"field":column,
+                            "dtype":str(df[column].dtype),"non_null":int(df[column].notna().sum()),
+                            "unique":int(hashable_values.nunique()) if not df.empty else 0,
+                        })
+                st.markdown("#### Generated schema inventory")
+                st.dataframe(pd.DataFrame(schema_rows),hide_index=True,width="stretch",height=500)
+
+        with tabs[10]:
+            st.markdown("### Recursive materialized data products")
+            st.write(
+                "A materialized aggregate becomes a new content-addressed ATLAS object. "
+                "It records the runs and earlier products it depends on, so an aggregate may "
+                "be compared, validated, transformed, or aggregated again."
+            )
+            if store is None:
+                st.info("Enable persistent storage to materialize versioned data products.")
+            else:
+                products_df=store.list_products()
+                p1,p2=st.columns([1.4,1])
+                product_name=p1.text_input("Product name","ATLAS language-space coverage",key="product_name")
+                product_type=p2.selectbox(
+                    "Product type",
+                    ["LANGUAGE_SPACE_COVERAGE","RELATION_INVENTORY","TRAINING_CORPUS",
+                     "GAP_ACQUISITION_QUEUE","RUN_DRIFT","DATASET_SUMMARY"],
+                    key="product_type"
+                )
+                existing_product_ids=products_df["product_id"].tolist() if not products_df.empty else []
+                source_product_ids=st.multiselect(
+                    "Earlier data products to aggregate recursively",existing_product_ids,
+                    key="source_product_ids"
+                )
+                product_min_conf=st.slider(
+                    "Training-product confidence gate",0.0,1.0,.60,.05,
+                    key="product_training_gate"
+                )
+                if st.button("Materialize versioned data product",type="primary",key="materialize_product"):
+                    product=materialize_atlas_product(
+                        product_name,product_type,tables,ledger,source_product_ids,product_min_conf
+                    )
+                    if store.save_product(product):
+                        st.success(
+                            f"Materialized {product.name} as {product.product_id} with "
+                            f"{len(product.source_run_ids)} run dependencies and "
+                            f"{len(product.source_product_ids)} product dependencies."
+                        )
+                    else:
+                        st.info("An identical content-addressed data product already exists.")
+                    products_df=store.list_products()
+                if products_df.empty:
+                    st.info("No materialized products yet.")
+                else:
+                    st.dataframe(products_df,hide_index=True,width="stretch",height=560)
+
+        with tabs[11]:
+            st.markdown("### Question-driven display selection")
+            question=st.text_area(
+                "What relationship should the aggregate reveal?",
+                "Where are the largest language-map coverage gaps, and which evidence source should ATLAS acquire next?",
+                height=100,key="atlas_view_question"
+            )
+            recommendations=atlas_view_recommendations(
+                question,tables,len(ledger),len(sources_df)
+            )
+            st.dataframe(recommendations,hide_index=True,width="stretch")
+            lens=st.selectbox(
+                "Render a view lens",
+                ["Coverage / Missingness","Evidence / Lineage","Relations / Network",
+                 "Run Drift","Training / Supervision","Confidence / Uncertainty"],
+                key="atlas_view_lens"
+            )
+            if lens=="Coverage / Missingness":
+                matrix=atlas_coverage_matrix(coords)
+                if matrix.empty:
+                    st.info("No coverage data.")
+                else:
+                    fig=go.Figure(go.Heatmap(
+                        z=matrix.values,x=matrix.columns,y=matrix.index,zmin=0,zmax=1,
+                        colorscale="Viridis",colorbar=dict(title="Known rate")
+                    ))
+                    fig.update_layout(template="plotly_dark",height=560,title="Evidence-aware coverage geometry")
+                    st.plotly_chart(fig,width="stretch")
+            elif lens=="Evidence / Lineage":
+                st.plotly_chart(make_data_lineage_sankey(objects,coords),width="stretch")
+            elif lens=="Relations / Network":
+                if edges.empty:
+                    st.info("No edge facts.")
+                else:
+                    relation_view=edges.groupby(["space","edge_type","relation"]).agg(
+                        count=("relation","size"),mean_weight=("weight","mean"),
+                        languages=("language","nunique")
+                    ).reset_index().sort_values("count",ascending=False)
+                    st.dataframe(relation_view,hide_index=True,width="stretch",height=620)
+            elif lens=="Run Drift":
+                drift=atlas_drift_table(coords,manifests)
+                st.dataframe(drift,hide_index=True,width="stretch",height=620) if not drift.empty else st.info("Repeat a stable carrier across runs to create a drift trajectory.")
+            elif lens=="Training / Supervision":
+                if examples.empty:
+                    st.info("No training candidates.")
+                else:
+                    training_view=examples.groupby(["task_type","observation_status","eligible_by_default"]).agg(
+                        examples=("example_id","size"),mean_confidence=("confidence","mean"),
+                        languages=("language","nunique")
+                    ).reset_index()
+                    st.dataframe(training_view,hide_index=True,width="stretch")
+            else:
+                utterance_objects=objects[objects["object_type"]=="utterance"].copy()
+                if utterance_objects.empty:
+                    st.info("No utterance confidence data.")
+                else:
+                    uncertainty_meta=metadata_df[
+                        (metadata_df["object_type"]=="utterance")
+                        & (metadata_df["category"]=="uncertainty")
+                        & (metadata_df["key"]=="entropy_proxy")
+                    ][["run_id","object_id","value"]].copy()
+                    uncertainty_meta["uncertainty"]=pd.to_numeric(uncertainty_meta["value"],errors="coerce")
+                    plot=utterance_objects.merge(
+                        uncertainty_meta[["run_id","object_id","uncertainty"]],
+                        on=["run_id","object_id"],how="left"
+                    )
+                    fig=go.Figure(go.Scatter(
+                        x=plot["uncertainty"],y=plot["comprehension_score"],mode="markers",
+                        text=plot["label"],marker=dict(size=10,color=plot["comprehension_score"],colorscale="Turbo")
+                    ))
+                    fig.update_layout(
+                        template="plotly_dark",height=560,
+                        title="Comprehension support versus uncertainty",
+                        xaxis_title="Uncertainty entropy",yaxis_title="Comprehension support"
+                    )
+                    st.plotly_chart(fig,width="stretch")
+
+if "atlas_last_dataset_run" in st.session_state:
+    latest=st.session_state["atlas_last_dataset_run"]
+    latest_manifest=latest.get("manifest",{})
+    latest_examples=latest.get("training_examples",[])
+    latest_eligible=[x for x in latest_examples if bool(x.get("eligible_by_default"))]
+    with st.expander("Latest generated training-data run",expanded=True):
+        lm=st.columns(5)
+        lm[0].metric("Task types",len({x.get("task_type") for x in latest_examples}))
+        lm[1].metric("Candidates",len(latest_examples))
+        lm[2].metric("Default eligible",len(latest_eligible))
+        lm[3].metric("Hard negatives",sum(bool(x.get("is_negative")) for x in latest_examples))
+        lm[4].metric("Schema",latest_manifest.get("schema_version",""))
+        lc1,lc2,lc3=st.columns(3)
+        lc1.download_button(
+            "Download this run JSON",
+            json.dumps(json_safe(latest),ensure_ascii=False,indent=2).encode("utf-8"),
+            "atlas_latest_training_run.json","application/json",width="stretch",
+            key="latest_run_json",
+        )
+        lc2.download_button(
+            "Download eligible JSONL",
+            "\n".join(json.dumps(json_safe(x),ensure_ascii=False) for x in latest_eligible).encode("utf-8"),
+            "atlas_latest_eligible_training.jsonl","application/x-ndjson",width="stretch",
+            key="latest_run_jsonl",
+        )
+        lc3.download_button(
+            "Download complete training ZIP",atlas_dataset_zip([latest]),
+            "atlas_latest_training_bundle.zip","application/zip",width="stretch",
+            key="latest_run_zip",
+        )
+
 st.divider()
 st.caption(
-    "ATLAS v10 active-native-map prototype: language maps are computational analyzers rather than "
+    "ATLAS v11.0 training-data foundry: language maps are computational analyzers rather than "
     "generic complexity profiles. English, Persian, Arabic, Mandarin, and Turkish use dedicated native "
     "analysis paths; other registered languages expose explicit structural profiles until dedicated "
     "analyzers are implemented. Missing native coordinates are non-observations, not zero-valued geometry."
