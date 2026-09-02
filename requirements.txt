@@ -10,5 +10,5 @@ torch
 umap-learn
 hdbscan
 streamlit
-gensim
+gensim==4.4.0
 torchvision
