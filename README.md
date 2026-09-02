@@ -1,7 +1,7 @@
 Current version:
 ------------------------------------------
 
-ATLAS v10 — Active Native Language Maps
+ATLAS v11 — Active Native Language Maps
 
 ------------------------------------------
 
